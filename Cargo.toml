@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 thiserror = "2"
 dunce = "1.0"
+bitflags = "2.9.0"
 # iceoryx2 = { version = "0.5.0", features = ["logger_tracing"] }
 # iceoryx2-bb-system-types = "0.5.0"
 # iceoryx2-bb-container = "0.5.0"

@@ -2,8 +2,9 @@ use std::{ffi::{c_char, c_int, CStr}, path::{Path, PathBuf}, sync::OnceLock, tim
 use iceoryx2::{node::{Node, NodeBuilder, NodeWaitFailure}, service::ipc};
 use iceoryx2_bb_container::semantic_string::SemanticString;
 use thiserror::Error;
+use bitflags::bitflags;
 
-/// Maximum message size in bytes
+/// Maximum message size in bytes.
 const PRESET_N: usize = 2048;
 #[unsafe(no_mangle)]
 pub static SC_PRESET_N: usize = PRESET_N;
@@ -38,7 +39,32 @@ impl<const N: usize> Blob<N> {
     }
 }
 
-/// Possible errors during initialization
+/// Flag indicating that the subscriber should be created during initialization.
+/// Pass this to `sc_init`.
+#[unsafe(no_mangle)]
+pub static SC_INIT_FLAGS_CREAT_SUBSCRIBER: u32 = 0b00000001;
+/// Flag indicating that the publisher should be created during initialization.
+/// Pass this to `sc_init`.
+#[unsafe(no_mangle)]
+pub static SC_INIT_FLAGS_CREAT_PUBLISHER: u32 = 0b00000010;
+
+bitflags! {
+    /// Flags used during the initialization of SkyCurrent.
+    /// 
+    /// The following flags are currently supported:
+    /// 
+    /// - `CREAT_SUBSCRIBER` (0b00000001): Create a subscriber.
+    /// - `CREAT_PUBLISHER` (0b00000010): Create a publisher.
+    pub struct InitFlags: u32 {
+        /// Create a subscriber.
+        const CREAT_SUBSCRIBER = 0b00000001;
+
+        /// Create a publisher.
+        const CREAT_PUBLISHER = 0b00000010;
+    }
+}
+
+/// Possible errors during initialization.
 #[derive(Error, Debug)]
 pub enum InitError {
     /// Expected a project folder, but instead was provided with a path that does not exist or is not a folder.
@@ -75,7 +101,7 @@ pub enum InitError {
 /// SkyCurrent works on a project basis, and a project is contained within a folder.
 /// 
 /// Initialize takes a `path` pointing to a project folder and sets up only the IPC part if it does not exist already. Otherwise, it is a no-op.
-pub fn init(path: &Path) -> Result<(), InitError> {
+pub fn init(path: &Path, flags: InitFlags) -> Result<(), InitError> {
     // We are expecting a project folder. If the project folder does not exist or is not a directory, we cannot continue.
     if !path.is_dir() {
         return Err(InitError::NotAFolder(path.to_path_buf()));
@@ -174,26 +200,33 @@ event-id-max-value                          = 4294967295
     let service = node.service_builder(&"SkyCurrent".try_into().unwrap()) // Unwrap is fine here because the service name is static.
         .publish_subscribe::<BlobSized>()
         .open_or_create()?;
-    let publisher = service.publisher_builder().create()?;
-    let subscriber = service.subscriber_builder().create()?;
 
-    PROJECT_ROOT_PATH.with(|cell| {
-        cell.get_or_init(|| path);
-    });
-    IOX2_CUSTOM_CONFIG.with(|cell| {
-        cell.get_or_init(|| custom_config);
+    if flags.intersects(InitFlags::CREAT_PUBLISHER) {
+        let publisher = service.publisher_builder().create()?;
+        
+        IOX2_PUB.with(|cell| {
+            cell.get_or_init(|| publisher);
+        });
+    }
+    if flags.intersects(InitFlags::CREAT_SUBSCRIBER) {
+        let subscriber = service.subscriber_builder().create()?;
+
+        IOX2_SUB.with(|cell| {
+            cell.get_or_init(|| subscriber);
+        });
+    }
+
+    IOX2_SERVICE.with(|cell| {
+        cell.get_or_init(|| service);
     });
     IOX2_NODE.with(|cell| {
         cell.get_or_init(|| node);
     });
-    IOX2_SERVICE.with(|cell| {
-        cell.get_or_init(|| service);
+    IOX2_CUSTOM_CONFIG.with(|cell| {
+        cell.get_or_init(|| custom_config);
     });
-    IOX2_PUB.with(|cell| {
-        cell.get_or_init(|| publisher);
-    });
-    IOX2_SUB.with(|cell| {
-        cell.get_or_init(|| subscriber);
+    PROJECT_ROOT_PATH.with(|cell| {
+        cell.get_or_init(|| path);
     });
 
     Ok(())
@@ -298,7 +331,7 @@ pub fn recv_page<F: FnOnce(&BlobSized) -> R, R>(f: F) -> Result<Option<R>, IpcEr
 
 /// Expose `init` for C consumers.
 /// 
-/// Initializes SkyCurrent with the given project folder path.
+/// Initializes SkyCurrent with the given project folder path and the given flags. See `InitFlags` for details on the available flags.
 /// 
 /// Note that you should initialize once per thread.
 /// 
@@ -316,10 +349,12 @@ pub fn recv_page<F: FnOnce(&BlobSized) -> R, R>(f: F) -> Result<Option<R>, IpcEr
 /// -21 if config file path is invalid
 /// -22 if config file is invalid (possibly because it was manually edited since last time it was automatically generated)
 #[unsafe(no_mangle)]
-pub extern "C" fn sc_init(path: *const c_char) -> c_int {
+pub extern "C" fn sc_init(path: *const c_char, flags: u32) -> c_int {
     let c_str = unsafe { CStr::from_ptr(path) };
     if let Ok(path_string) = c_str.to_str() {
-        match init(Path::new(path_string)) {
+        // Convert flags into `InitFlags`
+        let init_flags = InitFlags::from_bits_retain(flags);
+        match init(Path::new(path_string), init_flags) {
             Ok(_) => 0,
             Err(e) => match e {
                 InitError::NotAFolder(_) => -2,
