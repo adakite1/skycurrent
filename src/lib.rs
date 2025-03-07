@@ -1,6 +1,7 @@
 use std::{ffi::{c_char, c_int, CStr}, path::{Path, PathBuf}, sync::OnceLock, time::Duration};
 use iceoryx2::{node::{Node, NodeBuilder, NodeWaitFailure}, service::ipc};
 use iceoryx2_bb_container::semantic_string::SemanticString;
+use iceoryx2_cal::event::TriggerId;
 use thiserror::Error;
 use bitflags::bitflags;
 
@@ -18,7 +19,10 @@ thread_local! {
     static PROJECT_ROOT_PATH: OnceLock<PathBuf> = OnceLock::new();
     static IOX2_CUSTOM_CONFIG: OnceLock<iceoryx2::config::Config> = OnceLock::new();
     static IOX2_NODE: OnceLock<Node<ipc::Service>> = OnceLock::new();
-    static IOX2_SERVICE: OnceLock<iceoryx2::service::port_factory::publish_subscribe::PortFactory<ipc::Service, Blob<PRESET_N>, ()>> = OnceLock::new();
+    static IOX2_SERVICE_EVENTS: OnceLock<iceoryx2::service::port_factory::event::PortFactory<ipc::Service>> = OnceLock::new();
+    static IOX2_NOTIF: OnceLock<iceoryx2::port::notifier::Notifier<ipc::Service>> = OnceLock::new();
+    static IOX2_LISTE: OnceLock<iceoryx2::port::listener::Listener<ipc::Service>> = OnceLock::new();
+    static IOX2_SERVICE_PUB_SUB: OnceLock<iceoryx2::service::port_factory::publish_subscribe::PortFactory<ipc::Service, Blob<PRESET_N>, ()>> = OnceLock::new();
     static IOX2_PUB: OnceLock<iceoryx2::port::publisher::Publisher<ipc::Service, Blob<PRESET_N>, ()>> = OnceLock::new();
     static IOX2_SUB: OnceLock<iceoryx2::port::subscriber::Subscriber<ipc::Service, Blob<PRESET_N>, ()>> = OnceLock::new();
 }
@@ -47,6 +51,14 @@ pub static SC_INIT_FLAGS_CREAT_SUBSCRIBER: u32 = 0b00000001;
 /// Pass this to `sc_init`.
 #[unsafe(no_mangle)]
 pub static SC_INIT_FLAGS_CREAT_PUBLISHER: u32 = 0b00000010;
+/// Flag indicating that the listener should be created during initialization.
+/// Pass this to `sc_init`.
+#[unsafe(no_mangle)]
+pub static SC_INIT_FLAGS_CREAT_LISTENER: u32 = 0b00000100;
+/// Flag indicating that the notifier should be created during initialization.
+/// Pass this to `sc_init`.
+#[unsafe(no_mangle)]
+pub static SC_INIT_FLAGS_CREAT_NOTIFIER: u32 = 0b00001000;
 
 bitflags! {
     /// Flags used during the initialization of SkyCurrent.
@@ -55,12 +67,20 @@ bitflags! {
     /// 
     /// - `CREAT_SUBSCRIBER` (0b00000001): Create a subscriber.
     /// - `CREAT_PUBLISHER` (0b00000010): Create a publisher.
+    /// - `CREAT_LISTENER` (0b00000100): Create a listener.
+    /// - `CREAT_NOTIFIER` (0b00001000): Create a notifier.
     pub struct InitFlags: u32 {
         /// Create a subscriber.
         const CREAT_SUBSCRIBER = 0b00000001;
 
         /// Create a publisher.
         const CREAT_PUBLISHER = 0b00000010;
+
+        /// Create a listener.
+        const CREAT_LISTENER = 0b00000100;
+
+        /// Create a notifier.
+        const CREAT_NOTIFIER = 0b00001000;
     }
 }
 
@@ -82,6 +102,15 @@ pub enum InitError {
     /// Failed to create iceoryx2 node for IPC.
     #[error("failed to create iceoryx2 node")]
     Iox2NodeCreationFailure(#[from] iceoryx2::node::NodeCreationFailure),
+    /// Failed to open or create the iceoryx2 events client.
+    #[error("failed to open or create the iceoryx2 events client")]
+    Iox2EventOpenOrCreateError(#[from] iceoryx2::service::builder::event::EventOpenOrCreateError),
+    /// Failed to create notifier.
+    #[error("failed to create notifier")]
+    Iox2NotifierCreateError(#[from] iceoryx2::port::notifier::NotifierCreateError),
+    /// Failed to create listener.
+    #[error("failed to create listener")]
+    Iox2ListenerCreateError(#[from] iceoryx2::port::listener::ListenerCreateError),
     /// Failed to open or create the iceoryx2 pub/sub client.
     #[error("failed to open or create the iceoryx2 pub/sub client")]
     Iox2PublishSubscribeOpenOrCreateError(#[from] iceoryx2::service::builder::publish_subscribe::PublishSubscribeOpenOrCreateError),
@@ -197,27 +226,44 @@ event-id-max-value                          = 4294967295
     let node = NodeBuilder::new()
         .config(&custom_config)
         .create::<ipc::Service>()?;
-    let service = node.service_builder(&"SkyCurrent".try_into().unwrap()) // Unwrap is fine here because the service name is static.
+
+    let service_events = node.service_builder(&"SkyCurrent/Events".try_into().unwrap()) // Unwrap is fine here because the service name is static.
+        .event()
+        .open_or_create()?;
+    if flags.intersects(InitFlags::CREAT_NOTIFIER) {
+        let notifier = service_events.notifier_builder().create()?;
+        IOX2_NOTIF.with(|cell| {
+            cell.get_or_init(|| notifier);
+        });
+    }
+    if flags.intersects(InitFlags::CREAT_LISTENER) {
+        let listener = service_events.listener_builder().create()?;
+        IOX2_LISTE.with(|cell| {
+            cell.get_or_init(|| listener);
+        });
+    }
+
+    let service_pub_sub = node.service_builder(&"SkyCurrent/PubSub".try_into().unwrap()) // Unwrap is fine here because the service name is static.
         .publish_subscribe::<BlobSized>()
         .open_or_create()?;
-
     if flags.intersects(InitFlags::CREAT_PUBLISHER) {
-        let publisher = service.publisher_builder().create()?;
-        
+        let publisher = service_pub_sub.publisher_builder().create()?;
         IOX2_PUB.with(|cell| {
             cell.get_or_init(|| publisher);
         });
     }
     if flags.intersects(InitFlags::CREAT_SUBSCRIBER) {
-        let subscriber = service.subscriber_builder().create()?;
-
+        let subscriber = service_pub_sub.subscriber_builder().create()?;
         IOX2_SUB.with(|cell| {
             cell.get_or_init(|| subscriber);
         });
     }
 
-    IOX2_SERVICE.with(|cell| {
-        cell.get_or_init(|| service);
+    IOX2_SERVICE_PUB_SUB.with(|cell| {
+        cell.get_or_init(|| service_pub_sub);
+    });
+    IOX2_SERVICE_EVENTS.with(|cell| {
+        cell.get_or_init(|| service_events);
     });
     IOX2_NODE.with(|cell| {
         cell.get_or_init(|| node);
@@ -239,6 +285,8 @@ pub enum InterruptSignals {
     Interrupt,
     /// A `SIGTERM` signal was received.
     TerminationRequest,
+    /// A generic interrupt signal was received.
+    GenericInterruptSignal,
 }
 /// Possible errors during normal operations
 #[derive(Error, Debug)]
@@ -252,6 +300,12 @@ pub enum IpcError {
     /// Failed to send a payload because it was too large.
     #[error("payload was too large! size was {0} but maximum is {1}")]
     PayloadTooLarge(usize, usize),
+    /// Failed to send notification.
+    #[error("failed to send notification")]
+    Iox2NotifierNotifyError(#[from] iceoryx2::port::notifier::NotifierNotifyError),
+    /// Error while waiting for signal.
+    #[error("error happened while waiting for signal")]
+    Iox2ListenerWaitError(#[from] iceoryx2_cal::event::ListenerWaitError),
     /// Failed to get a sample loan from the iceoryx2 publisher.
     #[error("failed to get a sample loan from the publisher")]
     Iox2PublisherLoanError(#[from] iceoryx2::port::publisher::PublisherLoanError),
@@ -271,6 +325,49 @@ pub fn wait(cycle_time: Duration) -> Result<(), IpcError> {
                 NodeWaitFailure::Interrupt => IpcError::InterruptSignalReceivedError(InterruptSignals::Interrupt),
                 NodeWaitFailure::TerminationRequest => IpcError::InterruptSignalReceivedError(InterruptSignals::TerminationRequest)
             })
+        } else {
+            Err(IpcError::NotInitialized)
+        }
+    })
+}
+
+/// Wait for any event, returning an error and exiting early if an interrupt signal is received.
+/// 
+/// Once an event arrives, grab any other events that might have come simultaneously and call the callback function for every event ID received.
+pub fn wait_for_events<F: FnMut(usize)>(mut f: F) -> Result<(), IpcError> {
+    IOX2_LISTE.with(|cell| {
+        if let Some(listener) = cell.get() {
+            listener.blocking_wait_all(|event_id| f(event_id.as_value())).map_err(|e| match e {
+                iceoryx2_cal::event::ListenerWaitError::InterruptSignal => IpcError::InterruptSignalReceivedError(InterruptSignals::GenericInterruptSignal),
+                _ => IpcError::Iox2ListenerWaitError(e)
+            })
+        } else {
+            Err(IpcError::NotInitialized)
+        }
+    })
+}
+
+/// Wait for any event with a timeout, returning an error and exiting early if we reach the timeout or an interrupt signal is received.
+/// 
+/// Once an event arrives, grab any other events that might have come simultaneously and call the callback function for every event ID received.
+pub fn wait_for_events_with_timeout<F: FnMut(usize)>(mut f: F, timeout: Duration) -> Result<(), IpcError> {
+    IOX2_LISTE.with(|cell| {
+        if let Some(listener) = cell.get() {
+            listener.timed_wait_all(|event_id| f(event_id.as_value()), timeout).map_err(|e| match e {
+                iceoryx2_cal::event::ListenerWaitError::InterruptSignal => IpcError::InterruptSignalReceivedError(InterruptSignals::GenericInterruptSignal),
+                _ => IpcError::Iox2ListenerWaitError(e)
+            })
+        } else {
+            Err(IpcError::NotInitialized)
+        }
+    })
+}
+
+/// Notify all listeners of the event id. Return the number of listeners notified on success.
+pub fn notify(event_id: usize) -> Result<usize, IpcError> {
+    IOX2_NOTIF.with(|cell| {
+        if let Some(notifier) = cell.get() {
+            notifier.notify_with_custom_event_id(TriggerId::new(event_id)).map_err(|e| IpcError::Iox2NotifierNotifyError(e))
         } else {
             Err(IpcError::NotInitialized)
         }
@@ -343,11 +440,14 @@ pub fn recv_page<F: FnOnce(&BlobSized) -> R, R>(f: F) -> Result<Option<R>, IpcEr
 /// -4 if could not create a directory during initialization
 /// -16 if could not write IPC config file into tmp/ folder
 /// -17 if could not create IPC node
-/// -18 if could not create pub/sub client
-/// -19 if could not create publisher
-/// -20 if could not create subscriber
-/// -21 if config file path is invalid
-/// -22 if config file is invalid (possibly because it was manually edited since last time it was automatically generated)
+/// -18 if could not create events client
+/// -19 if could not create notifier
+/// -20 if could not create listener
+/// -21 if could not create pub/sub client
+/// -22 if could not create publisher
+/// -23 if could not create subscriber
+/// -24 if config file path is invalid
+/// -25 if config file is invalid (possibly because it was manually edited since last time it was automatically generated)
 #[unsafe(no_mangle)]
 pub extern "C" fn sc_init(path: *const c_char, flags: u32) -> c_int {
     let c_str = unsafe { CStr::from_ptr(path) };
@@ -362,11 +462,14 @@ pub extern "C" fn sc_init(path: *const c_char, flags: u32) -> c_int {
                 InitError::CreateDirError(_, _) => -4,
                 InitError::Iox2WriteIpcConfigError(_, _) => -16,
                 InitError::Iox2NodeCreationFailure(_) => -17,
-                InitError::Iox2PublishSubscribeOpenOrCreateError(_) => -18,
-                InitError::Iox2PublisherCreateError(_) => -19,
-                InitError::Iox2SubscriberCreateError(_) => -20,
-                InitError::Iox2InvalidConfigFilePathError(_, _) => -21,
-                InitError::Iox2ConfigCreationError(_) => -22,
+                InitError::Iox2EventOpenOrCreateError(_) => -18,
+                InitError::Iox2NotifierCreateError(_) => -19,
+                InitError::Iox2ListenerCreateError(_) => -20,
+                InitError::Iox2PublishSubscribeOpenOrCreateError(_) => -21,
+                InitError::Iox2PublisherCreateError(_) => -22,
+                InitError::Iox2SubscriberCreateError(_) => -23,
+                InitError::Iox2InvalidConfigFilePathError(_, _) => -24,
+                InitError::Iox2ConfigCreationError(_) => -25,
             },
         }
     } else {
@@ -380,11 +483,14 @@ fn match_ipc_error(e: &IpcError) -> c_int {
         IpcError::InterruptSignalReceivedError(interrupt_signals) => match interrupt_signals {
             InterruptSignals::Interrupt => 2,
             InterruptSignals::TerminationRequest => 15,
+            InterruptSignals::GenericInterruptSignal => 255
         },
         IpcError::PayloadTooLarge(_, _) => -2,
-        IpcError::Iox2PublisherLoanError(_) => -16,
-        IpcError::Iox2PublisherSendError(_) => -17,
-        IpcError::Iox2SubscriberReceiveError(_) => -18,
+        IpcError::Iox2NotifierNotifyError(_) => -16,
+        IpcError::Iox2ListenerWaitError(_) => -17,
+        IpcError::Iox2PublisherLoanError(_) => -18,
+        IpcError::Iox2PublisherSendError(_) => -19,
+        IpcError::Iox2SubscriberReceiveError(_) => -20,
     }
 }
 
@@ -406,6 +512,71 @@ pub extern "C" fn sc_wait(ms: u64) -> c_int {
     }
 }
 
+/// Expose `wait_for_events` for C consumers.
+/// 
+/// Waits for any event, and then once one arrives grabs any that happens to come simultaneously and calls the provided callback with the event IDs.
+/// 
+/// Returns:
+///  0 on success (received events and called callback)
+/// 255 if interrupted by a generic stop signal
+/// -1 if not initialized
+/// -17 if listener wait failed
+/// -64 if callback function pointer is null
+type EventCallback = extern "C" fn(usize);
+#[unsafe(no_mangle)]
+pub extern "C" fn sc_wait_for_events(f: Option<EventCallback>) -> c_int {
+    if f.is_none() { return -64; }
+    match wait_for_events(|event_id| {
+        if let Some(callback) = f {
+            callback(event_id);
+        }
+    }) {
+        Ok(_) => 0,
+        Err(e) => match_ipc_error(&e),
+    }
+}
+
+/// Expose `wait_for_events_with_timeout` for C consumers.
+/// 
+/// Waits for any event, and then once one arrives grabs any that happens to come simultaneously and calls the provided callback with the event IDs.
+/// 
+/// When the timeout is reached it returns early without having called the callback.
+/// 
+/// Returns:
+///  0 on success (received event and called callback, or timed out)
+/// 255 if interrupted by generic signal
+/// -1 if not initialized
+/// -17 if listener wait failed
+/// -64 if callback function pointer is null
+#[unsafe(no_mangle)]
+pub extern "C" fn sc_wait_for_events_with_timeout(f: Option<EventCallback>, ms: u64) -> c_int {
+    if f.is_none() { return -64; }
+    match wait_for_events_with_timeout(|event_id| {
+        if let Some(callback) = f {
+            callback(event_id);
+        }
+    }, Duration::from_millis(ms)) {
+        Ok(_) => 0,
+        Err(e) => match_ipc_error(&e),
+    }
+}
+
+/// Expose `notify` for C consumers.
+/// 
+/// Notifies all listeners with the given event ID. Returns the number of listeners notified on success.
+/// 
+/// Returns:
+///  0 or positive number indicating number of listeners notified on success
+/// -1 if not initialized
+/// -16 if notifier notification failed
+#[unsafe(no_mangle)]
+pub extern "C" fn sc_notify(event_id: usize) -> c_int {
+    match notify(event_id) {
+        Ok(n) => n as c_int,
+        Err(e) => match_ipc_error(&e),
+    }
+}
+
 /// Expose `send` for C consumers.
 /// 
 /// Sends a payload of arbitrary size. If the size is greater than PRESET_N-8 (8 bytes for header indicating payload size),
@@ -415,12 +586,12 @@ pub extern "C" fn sc_wait(ms: u64) -> c_int {
 ///  0 on success
 /// -1 if not initialized
 /// -2 if payload too large
-/// -16 if publisher loan failed
-/// -17 if publisher send failed
-/// -32 if data pointer is null
+/// -18 if publisher loan failed
+/// -19 if publisher send failed
+/// -64 if data pointer is null
 #[unsafe(no_mangle)]
 pub extern "C" fn sc_send(payload: *const u8, len: u64) -> c_int {
-    if payload.is_null() { return -32; }
+    if payload.is_null() { return -64; }
     if len > (PRESET_N - 8) as u64 {
         return match_ipc_error(&IpcError::PayloadTooLarge(len as usize, PRESET_N-8));
     }
@@ -446,12 +617,12 @@ pub extern "C" fn sc_send(payload: *const u8, len: u64) -> c_int {
 ///  0 on success (received message and called callback)
 ///  1 if no new messages available
 /// -1 if not initialized
-/// -18 if receive failed
-/// -32 if callback function pointer is null
+/// -20 if receive failed
+/// -64 if callback function pointer is null
 type RecvCallback = extern "C" fn(*const u8, u64);
 #[unsafe(no_mangle)]
 pub extern "C" fn sc_recv(f: Option<RecvCallback>) -> c_int {
-    if f.is_none() { return -32; }
+    if f.is_none() { return -64; }
     match recv(|payload| {
         let ptr = payload.as_ptr();
         let len = payload.len() as u64;
@@ -472,12 +643,12 @@ pub extern "C" fn sc_recv(f: Option<RecvCallback>) -> c_int {
 /// Returns:
 ///  0 on success
 /// -1 if not initialized
-/// -16 if publisher loan failed
-/// -17 if publisher send failed
-/// -32 if data pointer is null
+/// -18 if publisher loan failed
+/// -19 if publisher send failed
+/// -64 if data pointer is null
 #[unsafe(no_mangle)]
 pub extern "C" fn sc_send_page(payload: *const u8) -> c_int {
-    if payload.is_null() { return -32; }
+    if payload.is_null() { return -64; }
     let mut blob = [0u8; PRESET_N];
     unsafe {
         std::ptr::copy_nonoverlapping(payload, blob.as_mut_ptr(), PRESET_N);
@@ -500,12 +671,12 @@ pub extern "C" fn sc_send_page(payload: *const u8) -> c_int {
 ///  0 on success (received message and called callback)
 ///  1 if no new messages available
 /// -1 if not initialized
-/// -18 if receive failed
-/// -32 if callback function pointer is null
+/// -20 if receive failed
+/// -64 if callback function pointer is null
 type RecvPageCallback = extern "C" fn(*const u8);
 #[unsafe(no_mangle)]
 pub extern "C" fn sc_recv_page(f: Option<RecvPageCallback>) -> c_int {
-    if f.is_none() { return -32; }
+    if f.is_none() { return -64; }
     match recv_page(|blob| {
         let ptr = blob.0.as_ptr();
         if let Some(callback) = f {

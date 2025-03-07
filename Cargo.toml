@@ -13,3 +13,4 @@ bitflags = "2.9.0"
 iceoryx2 = { git = "https://github.com/eclipse-iceoryx/iceoryx2.git", rev = "b7fc3bf" }
 iceoryx2-bb-system-types = { git = "https://github.com/eclipse-iceoryx/iceoryx2.git", rev = "b7fc3bf" }
 iceoryx2-bb-container = { git = "https://github.com/eclipse-iceoryx/iceoryx2.git", rev = "b7fc3bf" }
+iceoryx2-cal = { git = "https://github.com/eclipse-iceoryx/iceoryx2.git", rev = "b7fc3bf" }
