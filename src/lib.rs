@@ -81,7 +81,7 @@ pub fn init(path: &Path) -> Result<(), InitError> {
         return Err(InitError::NotAFolder(path.to_path_buf()));
     }
     // Canonicalize the project folder path.
-    let path = path.canonicalize().map_err(|e| InitError::FailedToCanonicalizeProjectPath(path.to_path_buf(), e))?;
+    let path = dunce::canonicalize(path).map_err(|e| InitError::FailedToCanonicalizeProjectPath(path.to_path_buf(), e))?;
 
     // Set up common temporary directories.
     //  The res/ directory is for things that should not be checked into git but still makes sense to be kept around for a long time.
@@ -93,17 +93,74 @@ pub fn init(path: &Path) -> Result<(), InitError> {
 
     // IPC setup
     // Set up a root directory for iceoryx2.
-    let root = tmp.join(".iceoryx2");
+    let root = tmp.join("iceoryx2");
     std::fs::create_dir_all(&root).map_err(|e| InitError::CreateDirError(root.to_path_buf(), e))?;
 
     // Set up the global configuration file for iceoryx2 if it does not already exist.
     let config_path = tmp.join("iceoryx2.toml");
     if !config_path.exists() {
-        let config = format!("[global]
-            root-path-{} = '{}'
-            prefix = 'sc_'", 
-            if cfg!(windows) { "windows" } else { "unix" },
-            &root.to_string_lossy().to_string());
+        let config = format!("
+[global]
+root-path-unix                              = '{unix}'
+root-path-windows                           = '{windows}'
+prefix                                      = 'sc_'
+
+[global.node]
+directory                                   = 'nodes'
+monitor-suffix                              = '.node_monitor'
+static-config-suffix                        = '.details'
+service-tag-suffix                          = '.service_tag'
+cleanup-dead-nodes-on-creation              = true
+cleanup-dead-nodes-on-destruction           = true
+
+[global.service]
+directory                                   = 'services'
+publisher-data-segment-suffix               = '.publisher_data'
+static-config-storage-suffix                = '.service'
+dynamic-config-storage-suffix               = '.dynamic'
+event-connection-suffix                     = '.event'
+connection-suffix                           = '.connection'
+creation-timeout.secs                       = 0
+creation-timeout.nanos                      = 500000000
+
+[defaults.request-response]
+enable-safe-overflow-for-requests           = true
+enable-safe-overflow-for-responses          = true
+max-active-responses                        = 4
+max-active-requests                         = 2
+max-borrowed-responses                      = 4
+max-borrowed-requests                       = 2
+max-response-buffer-size                    = 2
+max-request-buffer-size                     = 4
+max-servers                                 = 2
+max-clients                                 = 8
+max-nodes                                   = 20
+
+[defaults.publish-subscribe]
+max-subscribers                             = 16
+max-publishers                              = 16
+max-nodes                                   = 20
+publisher-history-size                      = 0
+subscriber-max-buffer-size                  = 2
+subscriber-max-borrowed-samples             = 2
+publisher-max-loaned-samples                = 2
+enable-safe-overflow                        = true
+unable-to-deliver-strategy                  = 'Block' # or 'DiscardSample'
+subscriber-expired-connection-buffer        = 128
+
+[defaults.event]
+max-listeners                               = 16
+max-notifiers                               = 16
+max-nodes                                   = 36
+event-id-max-value                          = 4294967295
+# deadline.secs                               = 1 # uncomment to enable deadline
+# deadline.nanos                              = 0 # uncomment to enable deadline
+# notifier-created-event                      = 1 # uncomment to enable setting
+# notifier-dropped-event                      = 2 # uncomment to enable setting
+# notifier-dead-event                         = 3 # uncomment to enable setting", 
+            unix = if cfg!(unix) { root.to_string_lossy().to_string() } else { String::new() },
+            windows = if cfg!(windows) { root.to_string_lossy().to_string() } else { String::new() }
+            );
         std::fs::write(&config_path, config).map_err(|e| InitError::Iox2WriteIpcConfigError(config_path.to_path_buf(), e))?;
     }
 
