@@ -10,10 +10,10 @@ use bitflags::bitflags;
 /// Maximum message size in bytes.
 const PRESET_N: usize = 1024;
 #[unsafe(no_mangle)]
-pub static SC_PRESET_N: usize = PRESET_N;
+static SC_PRESET_N: usize = PRESET_N;
 
 /// A simple binary blob sized exactly to the IPC-expected length.
-pub type BlobSized = Blob<PRESET_N>;
+type BlobSized = Blob<PRESET_N>;
 
 // The library does not require its users to create any structures. Instead, service is 
 // thread-bound, meaning each thread will have its own set of local IPC configurations.
@@ -35,7 +35,7 @@ thread_local! {
 /// The default maximum message size is 2 KB (2048 Bytes), and messages must be padded to that length before being sent and received.
 #[repr(C)]
 #[derive(Debug)]
-pub struct Blob<const N: usize>(pub [u8; N]);
+struct Blob<const N: usize>(pub [u8; N]);
 impl<const N: usize> Blob<N> {
     /// Resizes the blob.
     pub fn resize<const T: usize>(self) -> Blob<T> {
@@ -49,19 +49,19 @@ impl<const N: usize> Blob<N> {
 /// Flag indicating that the subscriber should be created during initialization.
 /// Pass this to `sc_init`.
 #[unsafe(no_mangle)]
-pub static SC_INIT_FLAGS_CREAT_SUBSCRIBER: u32 = 0b00000001;
+pub static SC_INIT_FLAGS_IOX2_CREAT_SUBSCRIBER: u32 = 0b00000001;
 /// Flag indicating that the publisher should be created during initialization.
 /// Pass this to `sc_init`.
 #[unsafe(no_mangle)]
-pub static SC_INIT_FLAGS_CREAT_PUBLISHER: u32 = 0b00000010;
+pub static SC_INIT_FLAGS_IOX2_CREAT_PUBLISHER: u32 = 0b00000010;
 /// Flag indicating that the listener should be created during initialization.
 /// Pass this to `sc_init`.
 #[unsafe(no_mangle)]
-pub static SC_INIT_FLAGS_CREAT_LISTENER: u32 = 0b00000100;
+pub static SC_INIT_FLAGS_IOX2_CREAT_LISTENER: u32 = 0b00000100;
 /// Flag indicating that the notifier should be created during initialization.
 /// Pass this to `sc_init`.
 #[unsafe(no_mangle)]
-pub static SC_INIT_FLAGS_CREAT_NOTIFIER: u32 = 0b00001000;
+pub static SC_INIT_FLAGS_IOX2_CREAT_NOTIFIER: u32 = 0b00001000;
 
 bitflags! {
     /// Flags used during the initialization of SkyCurrent.
@@ -74,16 +74,16 @@ bitflags! {
     /// - `CREAT_NOTIFIER` (0b00001000): Create a notifier.
     pub struct InitFlags: u32 {
         /// Create a subscriber.
-        const CREAT_SUBSCRIBER = 0b00000001;
+        const IOX2_CREAT_SUBSCRIBER = 0b00000001;
 
         /// Create a publisher.
-        const CREAT_PUBLISHER = 0b00000010;
+        const IOX2_CREAT_PUBLISHER = 0b00000010;
 
         /// Create a listener.
-        const CREAT_LISTENER = 0b00000100;
+        const IOX2_CREAT_LISTENER = 0b00000100;
 
         /// Create a notifier.
-        const CREAT_NOTIFIER = 0b00001000;
+        const IOX2_CREAT_NOTIFIER = 0b00001000;
     }
 }
 
@@ -233,13 +233,13 @@ event-id-max-value                          = 4294967295
     let service_events = node.service_builder(&"SkyCurrent/Events".try_into().unwrap()) // Unwrap is fine here because the service name is static.
         .event()
         .open_or_create()?;
-    if flags.intersects(InitFlags::CREAT_NOTIFIER) {
+    if flags.intersects(InitFlags::IOX2_CREAT_NOTIFIER) {
         let notifier = service_events.notifier_builder().create()?;
         IOX2_NOTIF.with(|cell| {
             cell.get_or_init(|| notifier);
         });
     }
-    if flags.intersects(InitFlags::CREAT_LISTENER) {
+    if flags.intersects(InitFlags::IOX2_CREAT_LISTENER) {
         let listener = service_events.listener_builder().create()?;
         IOX2_LISTE.with(|cell| {
             cell.get_or_init(|| listener);
@@ -249,13 +249,13 @@ event-id-max-value                          = 4294967295
     let service_pub_sub = node.service_builder(&"SkyCurrent/PubSub".try_into().unwrap()) // Unwrap is fine here because the service name is static.
         .publish_subscribe::<BlobSized>()
         .open_or_create()?;
-    if flags.intersects(InitFlags::CREAT_PUBLISHER) {
+    if flags.intersects(InitFlags::IOX2_CREAT_PUBLISHER) {
         let publisher = service_pub_sub.publisher_builder().create()?;
         IOX2_PUB.with(|cell| {
             cell.get_or_init(|| publisher);
         });
     }
-    if flags.intersects(InitFlags::CREAT_SUBSCRIBER) {
+    if flags.intersects(InitFlags::IOX2_CREAT_SUBSCRIBER) {
         let subscriber = service_pub_sub.subscriber_builder().create()?;
         IOX2_SUB.with(|cell| {
             cell.get_or_init(|| subscriber);
@@ -328,7 +328,7 @@ pub enum IpcError {
 }
 
 /// Wait for the provided duration, returning an error and exiting early when `SIGINT` or `SIGTERM` is received.
-pub fn wait(cycle_time: Duration) -> Result<(), IpcError> {
+fn wait(cycle_time: Duration) -> Result<(), IpcError> {
     IOX2_NODE.with(|cell| {
         if let Some(node) = cell.get() {
             node.wait(cycle_time).map_err(|e| match e {
@@ -344,7 +344,7 @@ pub fn wait(cycle_time: Duration) -> Result<(), IpcError> {
 /// Wait for any event, returning an error and exiting early if an interrupt signal is received.
 /// 
 /// Once an event arrives, grab any other events that might have come simultaneously and call the callback function for every event ID received.
-pub fn wait_for_events<F: FnMut(usize)>(mut f: F) -> Result<(), IpcError> {
+fn wait_for_events<F: FnMut(usize)>(mut f: F) -> Result<(), IpcError> {
     IOX2_LISTE.with(|cell| {
         if let Some(listener) = cell.get() {
             listener.blocking_wait_all(|event_id| f(event_id.as_value())).map_err(|e| match e {
@@ -360,7 +360,7 @@ pub fn wait_for_events<F: FnMut(usize)>(mut f: F) -> Result<(), IpcError> {
 /// Wait for any event with a timeout, returning an error and exiting early if we reach the timeout or an interrupt signal is received.
 /// 
 /// Once an event arrives, grab any other events that might have come simultaneously and call the callback function for every event ID received.
-pub fn wait_for_events_with_timeout<F: FnMut(usize)>(mut f: F, timeout: Duration) -> Result<(), IpcError> {
+fn wait_for_events_with_timeout<F: FnMut(usize)>(mut f: F, timeout: Duration) -> Result<(), IpcError> {
     IOX2_LISTE.with(|cell| {
         if let Some(listener) = cell.get() {
             listener.timed_wait_all(|event_id| f(event_id.as_value()), timeout).map_err(|e| match e {
@@ -374,7 +374,7 @@ pub fn wait_for_events_with_timeout<F: FnMut(usize)>(mut f: F, timeout: Duration
 }
 
 /// Notify all listeners of the event id. Return the number of listeners notified on success.
-pub fn notify(event_id: usize) -> Result<usize, IpcError> {
+fn notify(event_id: usize) -> Result<usize, IpcError> {
     IOX2_NOTIF.with(|cell| {
         if let Some(notifier) = cell.get() {
             notifier.notify_with_custom_event_id(TriggerId::new(event_id)).map_err(|e| IpcError::Iox2NotifierNotifyError(e))
@@ -501,7 +501,9 @@ pub fn send_stream(payload: &[u8], header_size: usize) -> Result<Option<u64>, Ip
         data[..8].copy_from_slice(&(payload.len() as u64).to_le_bytes());
         //page[8..16] is already zero.
         data[16..(payload.len()+16)].copy_from_slice(payload);
-        return send_page(Blob::<PRESET_N>(data)).map(|_| None);
+        let result = send_page(Blob::<PRESET_N>(data)).map(|_| None);
+        notify(0)?;
+        return result;
     }
     // If the combined length of everything except the fragment data body is greater than or equal to the preset page size, then there's no way we can ever send the body data. Return an `IpcError::PayloadHeaderTooLarge` error.
     if (8+8+8+8+header_size) >= PRESET_N {
@@ -547,7 +549,7 @@ pub fn send_stream(payload: &[u8], header_size: usize) -> Result<Option<u64>, Ip
 }
 
 /// Send a payload of arbitrary size. If the size is greater than PRESET_N-8 (8 bytes for header indicating payload size), this will return an `IpcError::PayloadTooLarge` error.
-pub fn send_page_sized(payload: &[u8]) -> Result<(), IpcError> {
+fn send_page_sized(payload: &[u8]) -> Result<(), IpcError> {
     if payload.len() > (PRESET_N - 8) {
         return Err(IpcError::PayloadTooLarge(payload.len(), PRESET_N-8));
     }
@@ -560,7 +562,7 @@ pub fn send_page_sized(payload: &[u8]) -> Result<(), IpcError> {
 /// Try to receive a payload of arbitrary size. If there is one, call the provided callback function with that payload. Otherwise do nothing more and return `Ok(None)`.
 /// 
 /// If a payload is available and the callback is triggered, the return value of the callback is passed back through the option `Ok(Some(R))`.
-pub fn recv_page_sized<F: FnOnce(&[u8]) -> R, R>(f: F) -> Result<Option<R>, IpcError> {
+fn recv_page_sized<F: FnOnce(&[u8]) -> R, R>(f: F) -> Result<Option<R>, IpcError> {
     recv_page(|blob| {
         let payload_len = u64::from_le_bytes(blob.0[..8].try_into().unwrap()) as usize;
         f(&blob.0[8..(payload_len+8)])
@@ -568,7 +570,7 @@ pub fn recv_page_sized<F: FnOnce(&[u8]) -> R, R>(f: F) -> Result<Option<R>, IpcE
 }
 
 /// Send a payload of size PRESET_N.
-pub fn send_page(payload: BlobSized) -> Result<(), IpcError> {
+fn send_page(payload: BlobSized) -> Result<(), IpcError> {
     IOX2_PUB.with(|cell| {
         if let Some(publisher) = cell.get() {
             let sample = publisher.loan_uninit()?;
@@ -584,7 +586,7 @@ pub fn send_page(payload: BlobSized) -> Result<(), IpcError> {
 /// Try to receive a payload of size PRESET_N. If there is one, call the provided callback function with that payload. Otherwise do nothing more and return `Ok(None)`.
 /// 
 /// If a payload is available and the callback is triggered, the return value of the callback is passed back through the option `Ok(Some(R))`.
-pub fn recv_page<F: FnOnce(&BlobSized) -> R, R>(f: F) -> Result<Option<R>, IpcError> {
+fn recv_page<F: FnOnce(&BlobSized) -> R, R>(f: F) -> Result<Option<R>, IpcError> {
     IOX2_SUB.with(|cell| {
         if let Some(subscriber) = cell.get() {
             if let Some(sample) = subscriber.receive()? {
@@ -678,7 +680,7 @@ fn match_ipc_error(e: &IpcError) -> c_int {
 /// 15 if interrupted by SIGTERM
 /// -1 if not initialized
 #[unsafe(no_mangle)]
-pub extern "C" fn sc_wait(ms: u64) -> c_int {
+extern "C" fn sc_wait(ms: u64) -> c_int {
     let dur = std::time::Duration::from_millis(ms);
     match wait(dur) {
         Ok(_) => 0,
@@ -686,6 +688,7 @@ pub extern "C" fn sc_wait(ms: u64) -> c_int {
     }
 }
 
+type EventCallback = extern "C" fn(usize);
 /// Expose `wait_for_events` for C consumers.
 /// 
 /// Waits for any event, and then once one arrives grabs any that happens to come simultaneously and calls the provided callback with the event IDs.
@@ -696,9 +699,8 @@ pub extern "C" fn sc_wait(ms: u64) -> c_int {
 /// -1 if not initialized
 /// -17 if listener wait failed
 /// -64 if callback function pointer is null
-type EventCallback = extern "C" fn(usize);
 #[unsafe(no_mangle)]
-pub extern "C" fn sc_wait_for_events(f: Option<EventCallback>) -> c_int {
+extern "C" fn sc_wait_for_events(f: Option<EventCallback>) -> c_int {
     if f.is_none() { return -64; }
     match wait_for_events(|event_id| {
         if let Some(callback) = f {
@@ -723,7 +725,7 @@ pub extern "C" fn sc_wait_for_events(f: Option<EventCallback>) -> c_int {
 /// -17 if listener wait failed
 /// -64 if callback function pointer is null
 #[unsafe(no_mangle)]
-pub extern "C" fn sc_wait_for_events_with_timeout(f: Option<EventCallback>, ms: u64) -> c_int {
+extern "C" fn sc_wait_for_events_with_timeout(f: Option<EventCallback>, ms: u64) -> c_int {
     if f.is_none() { return -64; }
     match wait_for_events_with_timeout(|event_id| {
         if let Some(callback) = f {
@@ -744,9 +746,78 @@ pub extern "C" fn sc_wait_for_events_with_timeout(f: Option<EventCallback>, ms: 
 /// -1 if not initialized
 /// -16 if notifier notification failed
 #[unsafe(no_mangle)]
-pub extern "C" fn sc_notify(event_id: usize) -> c_int {
+extern "C" fn sc_notify(event_id: usize) -> c_int {
     match notify(event_id) {
         Ok(n) => n as c_int,
+        Err(e) => match_ipc_error(&e),
+    }
+}
+
+/// Expose `send_stream` for C consumers.
+/// Send an arbitrarily-sized payload by fragmenting.
+/// 
+/// The header_size specifies how many bytes from the head of the payload corresponds to the header;
+/// every fragment sent will include the header but have different sections of the body.
+/// 
+/// If identification is not null and fragmentation was used, writes the fragments identification value
+/// into the provided pointer.
+/// 
+/// Returns:
+///  0 on success (sent without fragmentation) 
+///  1 on success (sent with fragmentation)
+/// -1 if not initialized
+/// -3 if header size exceeds payload length
+/// -4 if header too large
+/// -16 if notifier notification failed
+/// -18 if publisher loan failed
+/// -19 if publisher send failed
+/// -64 if data pointer is null
+#[unsafe(no_mangle)]
+pub extern "C" fn sc_send_stream(payload: *const u8, len: usize, header_size: usize, identification: *mut u64) -> c_int {
+    if payload.is_null() { return -64; }
+    let payload = unsafe { std::slice::from_raw_parts(payload, len) };
+    match send_stream(payload, header_size) {
+        Ok(None) => 0,     // Sent without fragmentation
+        Ok(Some(id)) => {  // Sent with fragmentation
+            if !identification.is_null() {
+                unsafe { *identification = id; }
+            }
+            1
+        },
+        Err(e) => match_ipc_error(&e),
+    }
+}
+
+type ShouldCollectCallback = extern "C" fn(*const u8, u64) -> bool;
+type RecvCompleteCallback = extern "C" fn(*const u8, u64);
+/// Expose `recv_stream` for C consumers.
+/// Receive a payload of arbitrary size that may have been fragmented.
+/// 
+/// The should_collect callback is called with each incoming chunk's header to decide whether to 
+/// collect that chunk. Return true to collect, false to ignore.
+/// 
+/// When a complete message is received, the recv_complete callback is called with the full payload.
+/// 
+/// Returns:
+///  0  on success (received complete message and called callback)
+///  1  if no new messages available
+/// 255 if interrupted by a generic stop signal
+/// -1  if not initialized
+/// -17 if listener wait failed
+/// -20 if receive failed
+/// -64 if either callback function pointer is null
+#[unsafe(no_mangle)]
+pub extern "C" fn sc_recv_stream(should_collect: Option<ShouldCollectCallback>, recv_complete: Option<RecvCompleteCallback>) -> c_int {
+    if should_collect.is_none() || recv_complete.is_none() { return -64; }
+    
+    let should_collect = should_collect.unwrap();
+    let recv_complete = recv_complete.unwrap();
+    
+    match recv_stream(|header| should_collect(header.as_ptr(), header.len() as u64) == true) {
+        Ok(message) => {
+            recv_complete(message.as_ptr(), message.len() as u64);
+            0
+        },
         Err(e) => match_ipc_error(&e),
     }
 }
@@ -764,7 +835,7 @@ pub extern "C" fn sc_notify(event_id: usize) -> c_int {
 /// -19 if publisher send failed
 /// -64 if data pointer is null
 #[unsafe(no_mangle)]
-pub extern "C" fn sc_send_page_sized(payload: *const u8, len: u64) -> c_int {
+extern "C" fn sc_send_page_sized(payload: *const u8, len: u64) -> c_int {
     if payload.is_null() { return -64; }
     if len > (PRESET_N - 8) as u64 {
         return match_ipc_error(&IpcError::PayloadTooLarge(len as usize, PRESET_N-8));
@@ -779,6 +850,7 @@ pub extern "C" fn sc_send_page_sized(payload: *const u8, len: u64) -> c_int {
     }
 }
 
+type RecvCallback = extern "C" fn(*const u8, u64);
 /// Expose `recv_page_sized` for C consumers.
 /// 
 /// Calls the provided callback with the payload data pointer and length if there is a message available.
@@ -793,9 +865,8 @@ pub extern "C" fn sc_send_page_sized(payload: *const u8, len: u64) -> c_int {
 /// -1 if not initialized
 /// -20 if receive failed
 /// -64 if callback function pointer is null
-type RecvCallback = extern "C" fn(*const u8, u64);
 #[unsafe(no_mangle)]
-pub extern "C" fn sc_recv_page_sized(f: Option<RecvCallback>) -> c_int {
+extern "C" fn sc_recv_page_sized(f: Option<RecvCallback>) -> c_int {
     if f.is_none() { return -64; }
     match recv_page_sized(|payload| {
         let ptr = payload.as_ptr();
@@ -821,7 +892,7 @@ pub extern "C" fn sc_recv_page_sized(f: Option<RecvCallback>) -> c_int {
 /// -19 if publisher send failed
 /// -64 if data pointer is null
 #[unsafe(no_mangle)]
-pub extern "C" fn sc_send_page(payload: *const u8) -> c_int {
+extern "C" fn sc_send_page(payload: *const u8) -> c_int {
     if payload.is_null() { return -64; }
     let mut blob = [0u8; PRESET_N];
     unsafe {
@@ -833,6 +904,7 @@ pub extern "C" fn sc_send_page(payload: *const u8) -> c_int {
     }
 }
 
+type RecvPageCallback = extern "C" fn(*const u8);
 /// Expose `recv_page` for C consumers.
 /// 
 /// Calls the provided callback with the payload data pointer if there is a message available.
@@ -847,9 +919,8 @@ pub extern "C" fn sc_send_page(payload: *const u8) -> c_int {
 /// -1 if not initialized
 /// -20 if receive failed
 /// -64 if callback function pointer is null
-type RecvPageCallback = extern "C" fn(*const u8);
 #[unsafe(no_mangle)]
-pub extern "C" fn sc_recv_page(f: Option<RecvPageCallback>) -> c_int {
+extern "C" fn sc_recv_page(f: Option<RecvPageCallback>) -> c_int {
     if f.is_none() { return -64; }
     match recv_page(|blob| {
         let ptr = blob.0.as_ptr();
