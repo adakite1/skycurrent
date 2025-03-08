@@ -813,7 +813,7 @@ pub extern "C" fn sc_recv_stream(should_collect: Option<ShouldCollectCallback>, 
     let should_collect = should_collect.unwrap();
     let recv_complete = recv_complete.unwrap();
     
-    match recv_stream(|header| should_collect(header.as_ptr(), header.len() as u64) == true) {
+    match recv_stream(|header| should_collect(header.as_ptr(), header.len() as u64)) {
         Ok(message) => {
             recv_complete(message.as_ptr(), message.len() as u64);
             0
