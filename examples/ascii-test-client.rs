@@ -36,7 +36,7 @@ fn main() {
                     stdout.flush().unwrap();
 
                     // Send the payload.
-                    if let Err(e) = skycurrent::send_stream(input.as_bytes(), 0) {
+                    if let Err(e) = skycurrent::send_stream(input.as_bytes(), 1) {
                         error!("[Sender] Error sending: {:?}", e);
                         eprintln!("\x1b[31m[Sender] Error sending: {:?}\x1b[0m", e);
                     }
@@ -60,7 +60,7 @@ fn main() {
         loop {
             // Wait for a message.
             match skycurrent::recv_stream(|payload_header| {
-                true
+                payload_header[0] == 'a' as u8
             }) {
                 Ok(payload) => {
                     // Convert the raw bytes into a String.

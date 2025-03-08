@@ -8,7 +8,7 @@ use thiserror::Error;
 use bitflags::bitflags;
 
 /// Maximum message size in bytes.
-const PRESET_N: usize = 1024;
+const PRESET_N: usize = 34;
 #[unsafe(no_mangle)]
 static SC_PRESET_N: usize = PRESET_N;
 
@@ -395,12 +395,17 @@ pub fn recv_stream<I: FnMut(&[u8]) -> bool>(mut should_collect: I) -> Result<Vec
             let payload_body_len_remainder = u64::from_le_bytes(blob.0[..8].try_into().unwrap()) as usize;
             let chunk_i = u32::from_le_bytes(blob.0[8..12].try_into().unwrap()) as usize;
             let num_chunks = u32::from_le_bytes(blob.0[12..16].try_into().unwrap()) as usize;
+            let identification = u64::from_le_bytes(blob.0[16..24].try_into().unwrap());
             if num_chunks == 0 {  // We are not fragmenting.
                 let payload_len = payload_body_len_remainder;
-                Some(blob.0[16..(payload_len+16)].to_vec())
+                let header_size = identification as usize;
+                if should_collect(&blob.0[24..header_size+24]) {
+                    Some(blob.0[24..(payload_len+24)].to_vec())
+                } else {
+                    None
+                }
             } else {  // We are fragmenting.
                 // Read the rest of the metadata.
-                let identification = u64::from_le_bytes(blob.0[16..24].try_into().unwrap());
                 let header_size = u64::from_le_bytes(blob.0[24..32].try_into().unwrap()) as usize;
                 // Check if the user is interested in the fragment.
                 if should_collect(&blob.0[32..(header_size+32)]) {
@@ -496,11 +501,12 @@ pub fn send_stream(payload: &[u8], header_size: usize) -> Result<Option<u64>, Ip
         return Err(IpcError::PayloadHeaderSizeExceedsPayloadLength(header_size, payload.len()));
     }
     // Check if the entire payload actually fits in one page. If so, don't fragment.
-    if payload.len() <= (PRESET_N-8-8) {
+    if payload.len() <= (PRESET_N-8-8-8) {
         let mut data = [0; PRESET_N];
         data[..8].copy_from_slice(&(payload.len() as u64).to_le_bytes());
         //page[8..16] is already zero.
-        data[16..(payload.len()+16)].copy_from_slice(payload);
+        data[16..24].copy_from_slice(&header_size.to_le_bytes());
+        data[24..(payload.len()+24)].copy_from_slice(payload);
         let result = send_page(Blob::<PRESET_N>(data)).map(|_| None);
         notify(0)?;
         return result;
