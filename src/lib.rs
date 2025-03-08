@@ -1,12 +1,14 @@
-use std::{ffi::{c_char, c_int, CStr}, path::{Path, PathBuf}, sync::OnceLock, time::Duration};
+use std::{cell::{OnceCell, RefCell}, collections::HashMap, ffi::{c_char, c_int, CStr}, path::{Path, PathBuf}, time::Duration};
+use bitvec::prelude as bv;
 use iceoryx2::{node::{Node, NodeBuilder, NodeWaitFailure}, service::ipc};
 use iceoryx2_bb_container::semantic_string::SemanticString;
 use iceoryx2_cal::event::TriggerId;
+use rand::Rng;
 use thiserror::Error;
 use bitflags::bitflags;
 
 /// Maximum message size in bytes.
-const PRESET_N: usize = 2048;
+const PRESET_N: usize = 1024;
 #[unsafe(no_mangle)]
 pub static SC_PRESET_N: usize = PRESET_N;
 
@@ -16,15 +18,16 @@ pub type BlobSized = Blob<PRESET_N>;
 // The library does not require its users to create any structures. Instead, service is 
 // thread-bound, meaning each thread will have its own set of local IPC configurations.
 thread_local! {
-    static PROJECT_ROOT_PATH: OnceLock<PathBuf> = OnceLock::new();
-    static IOX2_CUSTOM_CONFIG: OnceLock<iceoryx2::config::Config> = OnceLock::new();
-    static IOX2_NODE: OnceLock<Node<ipc::Service>> = OnceLock::new();
-    static IOX2_SERVICE_EVENTS: OnceLock<iceoryx2::service::port_factory::event::PortFactory<ipc::Service>> = OnceLock::new();
-    static IOX2_NOTIF: OnceLock<iceoryx2::port::notifier::Notifier<ipc::Service>> = OnceLock::new();
-    static IOX2_LISTE: OnceLock<iceoryx2::port::listener::Listener<ipc::Service>> = OnceLock::new();
-    static IOX2_SERVICE_PUB_SUB: OnceLock<iceoryx2::service::port_factory::publish_subscribe::PortFactory<ipc::Service, Blob<PRESET_N>, ()>> = OnceLock::new();
-    static IOX2_PUB: OnceLock<iceoryx2::port::publisher::Publisher<ipc::Service, Blob<PRESET_N>, ()>> = OnceLock::new();
-    static IOX2_SUB: OnceLock<iceoryx2::port::subscriber::Subscriber<ipc::Service, Blob<PRESET_N>, ()>> = OnceLock::new();
+    static PROJECT_ROOT_PATH: OnceCell<PathBuf> = OnceCell::new();
+    static IOX2_CUSTOM_CONFIG: OnceCell<iceoryx2::config::Config> = OnceCell::new();
+    static IOX2_NODE: OnceCell<Node<ipc::Service>> = OnceCell::new();
+    static IOX2_SERVICE_EVENTS: OnceCell<iceoryx2::service::port_factory::event::PortFactory<ipc::Service>> = OnceCell::new();
+    static IOX2_NOTIF: OnceCell<iceoryx2::port::notifier::Notifier<ipc::Service>> = OnceCell::new();
+    static IOX2_LISTE: OnceCell<iceoryx2::port::listener::Listener<ipc::Service>> = OnceCell::new();
+    static IOX2_SERVICE_PUB_SUB: OnceCell<iceoryx2::service::port_factory::publish_subscribe::PortFactory<ipc::Service, Blob<PRESET_N>, ()>> = OnceCell::new();
+    static IOX2_PUB: OnceCell<iceoryx2::port::publisher::Publisher<ipc::Service, Blob<PRESET_N>, ()>> = OnceCell::new();
+    static IOX2_SUB: OnceCell<iceoryx2::port::subscriber::Subscriber<ipc::Service, Blob<PRESET_N>, ()>> = OnceCell::new();
+    static MERGE_ALLOCS: RefCell<HashMap<u64, (bv::BitVec, usize, Vec<u8>)>> = RefCell::new(HashMap::new());
 }
 
 /// A simple binary blob with N bytes in it.
@@ -196,10 +199,10 @@ max-subscribers                             = 16
 max-publishers                              = 16
 max-nodes                                   = 20
 publisher-history-size                      = 0
-subscriber-max-buffer-size                  = 2
-subscriber-max-borrowed-samples             = 2
-publisher-max-loaned-samples                = 2
-enable-safe-overflow                        = true
+subscriber-max-buffer-size                  = 10
+subscriber-max-borrowed-samples             = 10
+publisher-max-loaned-samples                = 10
+enable-safe-overflow                        = false
 unable-to-deliver-strategy                  = 'Block' # or 'DiscardSample'
 subscriber-expired-connection-buffer        = 128
 
@@ -271,6 +274,7 @@ event-id-max-value                          = 4294967295
     IOX2_CUSTOM_CONFIG.with(|cell| {
         cell.get_or_init(|| custom_config);
     });
+
     PROJECT_ROOT_PATH.with(|cell| {
         cell.get_or_init(|| path);
     });
@@ -300,6 +304,12 @@ pub enum IpcError {
     /// Failed to send a payload because it was too large.
     #[error("payload was too large! size was {0} but maximum is {1}")]
     PayloadTooLarge(usize, usize),
+    /// Invalid header size provided, header size exceeds payload length.
+    #[error("invalid header size, header size is {0} but payload itself is only {1}")]
+    PayloadHeaderSizeExceedsPayloadLength(usize, usize),
+    /// Failed to send a payload because its header was too large.
+    #[error("payload header was too large! size was {0} but maximum is {1}")]
+    PayloadHeaderTooLarge(usize, usize),
     /// Failed to send notification.
     #[error("failed to send notification")]
     Iox2NotifierNotifyError(#[from] iceoryx2::port::notifier::NotifierNotifyError),
@@ -374,8 +384,170 @@ pub fn notify(event_id: usize) -> Result<usize, IpcError> {
     })
 }
 
+/// Receive a payload of arbitrary size by fragmenting.
+/// 
+/// Note that since this requires assembly of data on the receiver-side, the `should_collect` callback is supplied with the header of each incoming chunk so that it may indicate whether it wants to collect said chunk and start a local merge.
+/// 
+/// This function blocks until it successfully finishes merging a message, returning that merged message as the result.
+pub fn recv_stream<I: FnMut(&[u8]) -> bool>(mut should_collect: I) -> Result<Vec<u8>, IpcError> {
+    loop {
+        match recv_page(|blob| {
+            let payload_body_len_remainder = u64::from_le_bytes(blob.0[..8].try_into().unwrap()) as usize;
+            let chunk_i = u32::from_le_bytes(blob.0[8..12].try_into().unwrap()) as usize;
+            let num_chunks = u32::from_le_bytes(blob.0[12..16].try_into().unwrap()) as usize;
+            if num_chunks == 0 {  // We are not fragmenting.
+                let payload_len = payload_body_len_remainder;
+                Some(blob.0[16..(payload_len+16)].to_vec())
+            } else {  // We are fragmenting.
+                // Read the rest of the metadata.
+                let identification = u64::from_le_bytes(blob.0[16..24].try_into().unwrap());
+                let header_size = u64::from_le_bytes(blob.0[24..32].try_into().unwrap()) as usize;
+                // Check if the user is interested in the fragment.
+                if should_collect(&blob.0[32..(header_size+32)]) {
+                    // The user has requested that we collect the fragment and begin merging the full data.
+                    // Calculate how much space to allocate to contain any future fragments.
+                    let chunk_size = PRESET_N-8-8-8-8-header_size;
+                    let total_len = header_size + (num_chunks - 1) * chunk_size + if payload_body_len_remainder == 0 { chunk_size } else { payload_body_len_remainder };
+                    MERGE_ALLOCS.with(|cell| {
+                        let current_count;
+                        {
+                            let mut allocations = cell.borrow_mut();
+
+                            // Allocate if we haven't done so yet, but otherwise get the existing allocation.
+                            let (merged, count, allocation) = allocations.entry(identification).or_insert_with(|| {
+                                // Allocate.
+                                let merged = bv::bitvec![0; num_chunks];
+                                let mut allocation = vec![0u8; total_len];
+
+                                // Copy the header in right after so that we only write the header once.
+                                allocation[..header_size].copy_from_slice(&blob.0[32..(header_size+32)]);
+
+                                (merged, 0, allocation)
+                            });
+
+                            // Check if this chunk has already been merged in or not.
+                            if merged[chunk_i] {
+                                // If it has already, then we don't need it and can ignore it.
+                                return None;
+                            }
+                            
+                            // Calculate the offset of this chunk.
+                            let chunk_start_offset = header_size + chunk_i * chunk_size;
+                            let actual_chunk_len;
+                            if num_chunks == (chunk_i+1) {
+                                // This is the last chunk, so use the remainder length instead of the full chunk length to calculate the end offset if it is not zero.
+                                actual_chunk_len = if payload_body_len_remainder == 0 { chunk_size } else { payload_body_len_remainder };
+                            } else {
+                                actual_chunk_len = chunk_size;
+                            }
+                            let chunk_end_offset = chunk_start_offset + actual_chunk_len;
+
+                            // Merge.
+                            allocation[chunk_start_offset..chunk_end_offset].copy_from_slice(&blob.0[(header_size+32)..(actual_chunk_len+header_size+32)]);
+
+                            // Update statistics.
+                            merged.set(chunk_i, true);
+                            *count += 1;
+                            
+                            current_count = *count;
+                        }
+
+                        // Check if this payload has been fully merged or not.
+                        if num_chunks == current_count {
+                            let mut allocations = cell.borrow_mut();
+
+                            if let Some((_, _, allocation)) = allocations.remove(&identification) {
+                                return Some(allocation);
+                            }
+                        }
+
+                        None
+                    })
+                } else {
+                    None
+                }
+            }
+        }) {
+            Ok(did_receive_new_page) => {
+                match did_receive_new_page {
+                    Some(callback_return_value) => {
+                        match callback_return_value {
+                            Some(merged_message) => return Ok(merged_message),
+                            None => continue,
+                        }
+                    },
+                    None => {
+                        wait_for_events(|_| {})?;
+                    },
+                }
+            },
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Send an arbitrarily-sized payload by fragmenting. On success, optionally returns the payload fragments identification value if the payload had to be fragmented. The identification value is always > 0.
+/// 
+/// Note that since this requires assembly of data on the receiver-side, all payloads should have a small header section so that receivers can decide if they want to reconstruct the message or pass on it, saving memory and execution time.
+/// 
+/// The `header_size` specifies how many bytes from the head of the payload corresponds to the header; every fragment sent will include the header but have different sections of the body.
+pub fn send_stream(payload: &[u8], header_size: usize) -> Result<Option<u64>, IpcError> {
+    if header_size > payload.len() {
+        return Err(IpcError::PayloadHeaderSizeExceedsPayloadLength(header_size, payload.len()));
+    }
+    // Check if the entire payload actually fits in one page. If so, don't fragment.
+    if payload.len() <= (PRESET_N-8-8) {
+        let mut data = [0; PRESET_N];
+        data[..8].copy_from_slice(&(payload.len() as u64).to_le_bytes());
+        //page[8..16] is already zero.
+        data[16..(payload.len()+16)].copy_from_slice(payload);
+        return send_page(Blob::<PRESET_N>(data)).map(|_| None);
+    }
+    // If the combined length of everything except the fragment data body is greater than or equal to the preset page size, then there's no way we can ever send the body data. Return an `IpcError::PayloadHeaderTooLarge` error.
+    if (8+8+8+8+header_size) >= PRESET_N {
+        // After subtracting the automatic header part, the header can fill the remaining space, but has to at least give us 1 byte to work with for fragmentation, hence the minus 1.
+        return Err(IpcError::PayloadHeaderTooLarge(header_size, PRESET_N-8-8-8-8-1));
+    }
+    // Otherwise, we'll need to fragment.
+    let chunk_size = PRESET_N-8-8-8-8-header_size;  // Thanks to the previous check, this will at minimum be 1.
+    let payload_header = &payload[..header_size];
+    let payload_body_chunks = payload[header_size..].chunks(chunk_size);
+    let num_chunks = payload_body_chunks.len();
+    let mut rng = rand::rng();
+    let mut identification = rng.random::<u64>();
+    while identification == 0 {
+        identification = rng.random::<u64>();
+    }
+    // Here there is the possibility that payload_body_chunks is empty, right? However, that situation only arises when the header does not fit into the page (since the body is empty only the header needs to fit) and if it doesn't fit there it won't fit here and it will have been rejected in the first few lines.
+    // Calculate some more constants.
+    let payload_body_len_remainder = (payload.len() - header_size) % chunk_size;
+    // Loop through each chunk and send it.
+    for (i, chunk) in payload_body_chunks.enumerate() {
+        let mut page = [0; PRESET_N];
+        page[..8].copy_from_slice(&payload_body_len_remainder.to_le_bytes());  // Instead of setting this field to the payload size like `send_page_sized`, we set it to the size of the last body chunk. This, combined with the next two fields and the PRESET_N allows us to calculate the total payload size quite easily.
+        page[8..12].copy_from_slice(&(i as u32).to_le_bytes());
+        page[12..16].copy_from_slice(&(num_chunks as u32).to_le_bytes());
+        page[16..24].copy_from_slice(&identification.to_le_bytes());
+        page[24..32].copy_from_slice(&(header_size as u64).to_le_bytes());
+        page[32..(header_size+32)].copy_from_slice(payload_header);
+        let actual_chunk_len = chunk.len();  // Final chunk will not be full.
+        page[(header_size+32)..(actual_chunk_len+header_size+32)].copy_from_slice(chunk);
+        let mut backoff = 100;
+        while let Err(_) = send_page(Blob::<PRESET_N>(page)) {
+            // Keep trying with exponential backoff.
+            if let Err(wait_error) = wait(Duration::from_millis(backoff)) {
+                return Err(wait_error);
+            }
+            backoff = 8000.min(backoff*2);
+        }
+        // Notify.
+        notify(0)?;
+    }
+    Ok(Some(identification))
+}
+
 /// Send a payload of arbitrary size. If the size is greater than PRESET_N-8 (8 bytes for header indicating payload size), this will return an `IpcError::PayloadTooLarge` error.
-pub fn send(payload: &[u8]) -> Result<(), IpcError> {
+pub fn send_page_sized(payload: &[u8]) -> Result<(), IpcError> {
     if payload.len() > (PRESET_N - 8) {
         return Err(IpcError::PayloadTooLarge(payload.len(), PRESET_N-8));
     }
@@ -388,7 +560,7 @@ pub fn send(payload: &[u8]) -> Result<(), IpcError> {
 /// Try to receive a payload of arbitrary size. If there is one, call the provided callback function with that payload. Otherwise do nothing more and return `Ok(None)`.
 /// 
 /// If a payload is available and the callback is triggered, the return value of the callback is passed back through the option `Ok(Some(R))`.
-pub fn recv<F: FnOnce(&[u8]) -> R, R>(f: F) -> Result<Option<R>, IpcError> {
+pub fn recv_page_sized<F: FnOnce(&[u8]) -> R, R>(f: F) -> Result<Option<R>, IpcError> {
     recv_page(|blob| {
         let payload_len = u64::from_le_bytes(blob.0[..8].try_into().unwrap()) as usize;
         f(&blob.0[8..(payload_len+8)])
@@ -486,6 +658,8 @@ fn match_ipc_error(e: &IpcError) -> c_int {
             InterruptSignals::GenericInterruptSignal => 255
         },
         IpcError::PayloadTooLarge(_, _) => -2,
+        IpcError::PayloadHeaderSizeExceedsPayloadLength(_, _) => -3,
+        IpcError::PayloadHeaderTooLarge(_, _) => -4,
         IpcError::Iox2NotifierNotifyError(_) => -16,
         IpcError::Iox2ListenerWaitError(_) => -17,
         IpcError::Iox2PublisherLoanError(_) => -18,
@@ -577,7 +751,7 @@ pub extern "C" fn sc_notify(event_id: usize) -> c_int {
     }
 }
 
-/// Expose `send` for C consumers.
+/// Expose `send_page_sized` for C consumers.
 /// 
 /// Sends a payload of arbitrary size. If the size is greater than PRESET_N-8 (8 bytes for header indicating payload size),
 /// this will return error code -2 (PayloadTooLarge).
@@ -590,7 +764,7 @@ pub extern "C" fn sc_notify(event_id: usize) -> c_int {
 /// -19 if publisher send failed
 /// -64 if data pointer is null
 #[unsafe(no_mangle)]
-pub extern "C" fn sc_send(payload: *const u8, len: u64) -> c_int {
+pub extern "C" fn sc_send_page_sized(payload: *const u8, len: u64) -> c_int {
     if payload.is_null() { return -64; }
     if len > (PRESET_N - 8) as u64 {
         return match_ipc_error(&IpcError::PayloadTooLarge(len as usize, PRESET_N-8));
@@ -605,7 +779,7 @@ pub extern "C" fn sc_send(payload: *const u8, len: u64) -> c_int {
     }
 }
 
-/// Expose `recv` for C consumers.
+/// Expose `recv_page_sized` for C consumers.
 /// 
 /// Calls the provided callback with the payload data pointer and length if there is a message available.
 /// 
@@ -621,9 +795,9 @@ pub extern "C" fn sc_send(payload: *const u8, len: u64) -> c_int {
 /// -64 if callback function pointer is null
 type RecvCallback = extern "C" fn(*const u8, u64);
 #[unsafe(no_mangle)]
-pub extern "C" fn sc_recv(f: Option<RecvCallback>) -> c_int {
+pub extern "C" fn sc_recv_page_sized(f: Option<RecvCallback>) -> c_int {
     if f.is_none() { return -64; }
-    match recv(|payload| {
+    match recv_page_sized(|payload| {
         let ptr = payload.as_ptr();
         let len = payload.len() as u64;
         if let Some(callback) = f {
