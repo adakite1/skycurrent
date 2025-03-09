@@ -111,7 +111,7 @@ struct LinkMessageQueue {
     root: Arc<Mutex<NextMessage>>,
     last: Arc<Mutex<NextMessage>>,
     tail: Arc<Mutex<NextMessage>>,
-    new_message_cvar: Arc<Condvar>,
+    new_message_pair: Arc<(Mutex<u8>, Condvar)>,
 }
 /// Smart pointer referencing the `Vec<u8>` payload inside of a stored element, guarded by a mutex for a temporary view of the data.
 pub struct MessageRef<'a> {
@@ -170,7 +170,7 @@ impl LinkMessageQueue {
             root: root_arc.clone(),
             last: root_arc,
             tail: tail_arc,
-            new_message_cvar: Arc::new(Condvar::new()),
+            new_message_pair: Arc::new((Mutex::new(0), Condvar::new())),
         }
     }
 
@@ -222,12 +222,16 @@ impl LinkMessageQueue {
         self.last = new_node;
 
         // Notify waiting consumers.
-        self.new_message_cvar.notify_all();
+        let (lock, cvar) = &*self.new_message_pair;
+        let mut wrapping_counter = lock.lock();
+        *wrapping_counter = wrapping_counter.wrapping_add(1);
+        cvar.notify_all();
     }
 
     pub fn create_consumer(&self) -> MessageConsumer {
         MessageConsumer {
             current: self.root.clone(),
+            new_message_pair: self.new_message_pair.clone(),
         }
     }
 }
@@ -236,6 +240,7 @@ impl LinkMessageQueue {
 /// Each unclaimed message is visited once and in order of arrival.
 pub struct MessageConsumer {
     current: Arc<Mutex<NextMessage>>,
+    new_message_pair: Arc<(Mutex<u8>, Condvar)>,
 }
 impl MessageConsumer {
     pub fn try_next(&mut self) -> Option<NextMessage> {
@@ -326,6 +331,20 @@ impl MessageConsumer {
         }
 
         return_value
+    }
+
+    pub fn next_blocking(&mut self) -> NextMessage {
+        loop {
+            // Try to get the next message.
+            if let Some(payload) = self.try_next() {
+                return payload;
+            }
+            
+            // No messages available, wait at the current position.
+            let (lock, cvar) = &*self.new_message_pair;
+            let mut wrapping_counter = lock.lock();
+            cvar.wait(&mut wrapping_counter);
+        }
     }
 }
 
