@@ -267,9 +267,49 @@ impl MessageConsumer {
         //     By doing so we can also subtly inform the list structure methods that it *was* pruned, because the list structure will expect the `last` node to point to the tail sentinel node, but once it sees that it no longer points to that,
         //     it will know that the node is no longer considered part of the list structure, and it can also get the hint that it needs to follow the `next` pointers until it reaches a node that *does* point to the tail sentinel.
 
+        // [3] Theory
+        // During pruning, current node *CANNOT* be claimed. Lock it for the duration.
+        // If current node is already claimed however, then do *NOT* update subsequent nodes' `next` addresses to self (aka, build a subtree pointing to self).
+        // Only traverse the tree until we reach the next proper node and update self so as to build a shortcut from self to next valid node.
+        // This ensure that:
+        // - Each prune creates a subtree of *ONLY* the type where dead nodes point towards a node that *was* guaranteed to be alive at the time of pruning.
+        // - Each prune also only creates shortcuts that reduce the level of separation from the current node to the main link.
+        // Furthermore, these invariants only hold when the entire pruning operation is done in one go!
+        // This means that the subtree is built in one go, and ensures that only once the subtree is built are other consumers allowed to consume the pointers, 
+        // avoiding any circular references that might occur.
+        // In practice, this *SHOULD* mean that when pruning, every lock created on intermediate nodes must be held until the pruning is done, but it is easy to see 
+        // that Rust will not allow us to hold an arbitrary vector of a bunch of locks.
+        // Thus, we must work with what we have.
+        // [4]
+        // On each iteration, we hold two locks, one on the current node and one on a node somewhere beyond the current one.
+        // We must then make sure that each iteration ends with a valid subtree with no recursion.
+        // The main pain point in achieving that is that, say we are node A, and the list is A, B, C, D.
+        // Initially: A => B, B => C, C => D
+        // Say B and C needs pruning.
+        // A => B, B => A, C => D
+        // then
+        // A => B, B => A, C => A
+        // then
+        // A => D, B => A, C => A
+        // As we can see, in between the tree becomes self-referencing, which is not what we want.
+        // Instead, we can do the following:
+        // Initially: A => B, B => C, C => D
+        // A => C, B => A, C => D
+        // In other words, notice that on that iteration, B gives us the destination we will visit on the next iteration of the loop, C.
+        // B *would* have visited C anyways, but now we have it pointed to us, so we point ourselves to C.
+        // And all that is to say, we build our very own subtree pointing to us one node at a time, each time making sure that the subtree's exit, us,
+        // does not point to any of the new entrants into our subtree but instead pointing to a new potential recruit. This way, the tree is valid in between 
+        // lock changes, and only transforms while no one else has the locks to see what we are doing. And when they get their own locks, the tree they see is 
+        // once again valid.
+
         {
             // Lock the current node.
             let mut current = self.current.lock();
+            // Lock the current node's message, as per [3]. Use the strictest lock (write lock) so that during the pruning operation, the current node cannot be claimed. Technically a read lock also works here but this is an important invariant.
+            let current_payload = current.payload.clone();
+            let current_payload_rw_lock = current_payload.write();
+            // Then check the claim status.
+            let current_is_claimed = current_payload_rw_lock.is_none();
 
             // Get a copy of the next node.
             let mut next = current.next.clone();
@@ -301,6 +341,11 @@ impl MessageConsumer {
                     } // Otherwise the next node is tail sentinel, so we shouldn't move to it, and our return value is already `None` by default so no need to change it.
 
                     break;
+                } else {
+                    // To fulfill invariant [4].
+                    if let Some(next_next_arc) = &next_lock.next {
+                        current.next = Some(next_next_arc.clone());
+                    }
                 }
                 // - The next node's payload has already been claimed, but it has not yet been pruned.
                 //   If so, we can prune it by updating it to point to us.
@@ -315,7 +360,14 @@ impl MessageConsumer {
                 let new_next = next_lock.next.clone();
 
                 // Since we're pruning this node now, set its `next` to the "earliest still valid node" which is us.
-                next_lock.next = Some(self.current.clone());
+                // But ONLY DO SO if we ourselves have not been claimed, and thus we ourselves are not eligible for pruning. See [3].
+                // [5] This is perhaps the tiny block of code that must be watched the most carefully, because this is the only part 
+                // of the graph building process where we can introduce cyclic links. The other places where we modify the graph are when 
+                // we introduce a new node (which, since it adds a new node, will never create cyclic links) and when we point ourselves 
+                // (current) towards the next valid node we find (which just makes a shortcut to another valid node further down the tree).
+                if !current_is_claimed {
+                    next_lock.next = Some(self.current.clone());
+                }
 
                 // Drop, then move to new next.
                 drop(next_lock);  // Drop the previous lock early.
