@@ -7,6 +7,9 @@ use rand::Rng;
 use thiserror::Error;
 use bitflags::bitflags;
 
+#[cfg(feature = "tokio")]
+pub mod tokio;
+
 /// Maximum message size in bytes.
 const PRESET_N: usize = 34;
 #[unsafe(no_mangle)]
@@ -384,12 +387,22 @@ fn notify(event_id: usize) -> Result<usize, IpcError> {
     })
 }
 
-/// Receive a payload of arbitrary size by fragmenting.
+/// Return value on `try_recv_stream` success.
+pub enum TryRecvStreamResult {
+    /// A new merge has been completed.
+    NewMerge(Vec<u8>),
+    /// More pages might reside in the buffer, waiting to be merged. Will be returned whenever a page was obtained in that run of `try_recv_stream`.
+    PagesStillPotentiallyAvailable,
+    /// Out of any accessible pages to merge for now. Will be returned whenever a page was unable to be obtained in that run of `try_recv_stream`.
+    OutOfAccessiblePages
+}
+
+/// Try to receive a payload of arbitrary size by fragmenting.
 /// 
 /// Note that since this requires assembly of data on the receiver-side, the `should_collect` callback is supplied with the header of each incoming chunk so that it may indicate whether it wants to collect said chunk and start a local merge.
 /// 
-/// This function blocks until it successfully finishes merging a message, returning that merged message as the result.
-pub fn recv_stream<I: FnMut(&[u8]) -> bool>(mut should_collect: I) -> Result<Vec<u8>, IpcError> {
+/// This function never blocks, instead attempting to get a single accessible page and merging it if told to do so, then returning immediately.
+pub fn try_recv_stream<I: FnMut(&[u8]) -> bool>(mut should_collect: I) -> Result<TryRecvStreamResult, IpcError> {
     loop {
         match recv_page(|blob| {
             let payload_body_len_remainder = u64::from_le_bytes(blob.0[..8].try_into().unwrap()) as usize;
@@ -417,19 +430,19 @@ pub fn recv_stream<I: FnMut(&[u8]) -> bool>(mut should_collect: I) -> Result<Vec
                         let current_count;
                         {
                             let mut allocations = cell.borrow_mut();
-
+    
                             // Allocate if we haven't done so yet, but otherwise get the existing allocation.
                             let (merged, count, allocation) = allocations.entry(identification).or_insert_with(|| {
                                 // Allocate.
                                 let merged = bv::bitvec![0; num_chunks];
                                 let mut allocation = vec![0u8; total_len];
-
+    
                                 // Copy the header in right after so that we only write the header once.
                                 allocation[..header_size].copy_from_slice(&blob.0[32..(header_size+32)]);
-
+    
                                 (merged, 0, allocation)
                             });
-
+    
                             // Check if this chunk has already been merged in or not.
                             if merged[chunk_i] {
                                 // If it has already, then we don't need it and can ignore it.
@@ -446,26 +459,26 @@ pub fn recv_stream<I: FnMut(&[u8]) -> bool>(mut should_collect: I) -> Result<Vec
                                 actual_chunk_len = chunk_size;
                             }
                             let chunk_end_offset = chunk_start_offset + actual_chunk_len;
-
+    
                             // Merge.
                             allocation[chunk_start_offset..chunk_end_offset].copy_from_slice(&blob.0[(header_size+32)..(actual_chunk_len+header_size+32)]);
-
+    
                             // Update statistics.
                             merged.set(chunk_i, true);
                             *count += 1;
                             
                             current_count = *count;
                         }
-
+    
                         // Check if this payload has been fully merged or not.
                         if num_chunks == current_count {
                             let mut allocations = cell.borrow_mut();
-
+    
                             if let Some((_, _, allocation)) = allocations.remove(&identification) {
                                 return Some(allocation);
                             }
                         }
-
+    
                         None
                     })
                 } else {
@@ -477,12 +490,12 @@ pub fn recv_stream<I: FnMut(&[u8]) -> bool>(mut should_collect: I) -> Result<Vec
                 match did_receive_new_page {
                     Some(callback_return_value) => {
                         match callback_return_value {
-                            Some(merged_message) => return Ok(merged_message),
-                            None => continue,
+                            Some(merged_message) => return Ok(TryRecvStreamResult::NewMerge(merged_message)),
+                            None => return Ok(TryRecvStreamResult::PagesStillPotentiallyAvailable),
                         }
                     },
                     None => {
-                        wait_for_events(|_| {})?;
+                        return Ok(TryRecvStreamResult::OutOfAccessiblePages);
                     },
                 }
             },
@@ -491,12 +504,50 @@ pub fn recv_stream<I: FnMut(&[u8]) -> bool>(mut should_collect: I) -> Result<Vec
     }
 }
 
-/// Send an arbitrarily-sized payload by fragmenting. On success, optionally returns the payload fragments identification value if the payload had to be fragmented. The identification value is always > 0.
+/// Wait until new item is available on stream.
+/// 
+/// This will return early if the shutdown signal is received, but only if that signal is sent from a different sending thread.
+pub fn wait_stream() -> Result<(), IpcError> {
+    wait_for_events(|_| {})
+}
+
+/// Sends a shutdown signal.
+/// 
+/// Note that this won't actually shut anything down! Uninitialization is done automatically when the thread upon which the instance of SkyCurrent is running exits normally.
+/// 
+/// This simply causes certain blocking functions to return early. Most notably, `wait_stream` should return early when this signal is sent.
+pub fn shutdown_signal() -> Result<usize, IpcError> {
+    notify(0)
+}
+
+/// Receive a payload of arbitrary size by fragmenting.
+/// 
+/// Note that since this requires assembly of data on the receiver-side, the `should_collect` callback is supplied with the header of each incoming chunk so that it may indicate whether it wants to collect said chunk and start a local merge.
+/// 
+/// This function blocks until it successfully finishes merging a message, returning that merged message as the result.
+pub fn recv_stream<I: FnMut(&[u8]) -> bool>(mut should_collect: I) -> Result<Vec<u8>, IpcError> {
+    loop {
+        match try_recv_stream(&mut should_collect) {
+            Ok(did_finish_new_merged_message_before_ran_out_of_accessible_pages) => match did_finish_new_merged_message_before_ran_out_of_accessible_pages {
+                TryRecvStreamResult::NewMerge(merged_message) => return Ok(merged_message),
+                TryRecvStreamResult::PagesStillPotentiallyAvailable => {
+                    continue;
+                },
+                TryRecvStreamResult::OutOfAccessiblePages => {
+                    wait_stream()?;
+                }
+            },
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Send an arbitrarily-sized payload by fragmenting.
 /// 
 /// Note that since this requires assembly of data on the receiver-side, all payloads should have a small header section so that receivers can decide if they want to reconstruct the message or pass on it, saving memory and execution time.
 /// 
 /// The `header_size` specifies how many bytes from the head of the payload corresponds to the header; every fragment sent will include the header but have different sections of the body.
-pub fn send_stream(payload: &[u8], header_size: usize) -> Result<Option<u64>, IpcError> {
+pub fn send_stream(payload: &[u8], header_size: usize) -> Result<(), IpcError> {
     if header_size > payload.len() {
         return Err(IpcError::PayloadHeaderSizeExceedsPayloadLength(header_size, payload.len()));
     }
@@ -507,7 +558,7 @@ pub fn send_stream(payload: &[u8], header_size: usize) -> Result<Option<u64>, Ip
         //page[8..16] is already zero.
         data[16..24].copy_from_slice(&header_size.to_le_bytes());
         data[24..(payload.len()+24)].copy_from_slice(payload);
-        let result = send_page(Blob::<PRESET_N>(data)).map(|_| None);
+        let result = send_page(Blob::<PRESET_N>(data));
         notify(0)?;
         return result;
     }
@@ -551,7 +602,7 @@ pub fn send_stream(payload: &[u8], header_size: usize) -> Result<Option<u64>, Ip
         // Notify.
         notify(0)?;
     }
-    Ok(Some(identification))
+    Ok(())
 }
 
 /// Send a payload of arbitrary size. If the size is greater than PRESET_N-8 (8 bytes for header indicating payload size), this will return an `IpcError::PayloadTooLarge` error.
@@ -765,12 +816,8 @@ extern "C" fn sc_notify(event_id: usize) -> c_int {
 /// The header_size specifies how many bytes from the head of the payload corresponds to the header;
 /// every fragment sent will include the header but have different sections of the body.
 /// 
-/// If identification is not null and fragmentation was used, writes the fragments identification value
-/// into the provided pointer.
-/// 
 /// Returns:
-///  0 on success (sent without fragmentation) 
-///  1 on success (sent with fragmentation)
+///  0 on success
 /// -1 if not initialized
 /// -3 if header size exceeds payload length
 /// -4 if header too large
@@ -779,17 +826,11 @@ extern "C" fn sc_notify(event_id: usize) -> c_int {
 /// -19 if publisher send failed
 /// -64 if data pointer is null
 #[unsafe(no_mangle)]
-pub extern "C" fn sc_send_stream(payload: *const u8, len: usize, header_size: usize, identification: *mut u64) -> c_int {
+pub extern "C" fn sc_send_stream(payload: *const u8, len: usize, header_size: usize) -> c_int {
     if payload.is_null() { return -64; }
     let payload = unsafe { std::slice::from_raw_parts(payload, len) };
     match send_stream(payload, header_size) {
-        Ok(None) => 0,     // Sent without fragmentation
-        Ok(Some(id)) => {  // Sent with fragmentation
-            if !identification.is_null() {
-                unsafe { *identification = id; }
-            }
-            1
-        },
+        Ok(_) => 0,                    // Sent successfully.
         Err(e) => match_ipc_error(&e),
     }
 }
@@ -806,7 +847,6 @@ type RecvCompleteCallback = extern "C" fn(*const u8, u64);
 /// 
 /// Returns:
 ///  0  on success (received complete message and called callback)
-///  1  if no new messages available
 /// 255 if interrupted by a generic stop signal
 /// -1  if not initialized
 /// -17 if listener wait failed
