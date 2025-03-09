@@ -107,7 +107,7 @@ impl SkyCurrentStreamSender {
 }
 
 /// A message queue based upon a linked list so that consuming iterators can decide to process any message atomically and independent of other consumers, who might be looking at a different set of messages.
-struct LinkMessageQueue {
+pub struct LinkMessageQueue {
     root: Arc<Mutex<NextMessage>>,
     last: Arc<Mutex<NextMessage>>,
     tail: Arc<Mutex<NextMessage>>,
@@ -139,15 +139,18 @@ impl NextMessage {
     fn is_claimed(&self) -> bool {
         self.payload.read().is_none()
     }
-    pub fn read(&self) -> MessageRef {
-        // [1] PUBLIC FACING METHOD!!! When a `NextMessage` is given, `MessageConsumer` NEEDS to make sure that the `NextMessage` HAS a payload.
-        MessageRef {
-            guard: self.payload.read()
+    pub fn read(&self) -> Option<MessageRef> {
+        let lock = self.payload.read();
+        if lock.is_some() {
+            Some(MessageRef {
+                guard: self.payload.read(),
+            })
+        } else {
+            None
         }
     }
-    pub fn claim(&mut self) -> Vec<u8> {
-        // [1] PUBLIC FACING METHOD!!! When a `NextMessage` is given, `MessageConsumer` NEEDS to make sure that the `NextMessage` HAS a payload.
-        self.payload.write().take().unwrap()
+    pub fn claim(&mut self) -> Option<Vec<u8>> {
+        self.payload.write().take()
     }
 }
 impl LinkMessageQueue {
