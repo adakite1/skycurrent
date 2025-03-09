@@ -1,5 +1,5 @@
 use std::{path::Path, sync::{Arc, OnceLock}};
-use parking_lot::Mutex;
+use parking_lot::{Condvar, Mutex};
 use tokio::sync::mpsc;
 use std::thread;
 
@@ -18,11 +18,11 @@ enum SendThreadMessage {
 }
 pub struct SkyCurrentStreamSender {
     sender_tx: mpsc::Sender<SendThreadMessage>,
-    sender_termination_tx: mpsc::Sender<bool>,
+    sender_termination_pair: Arc<(Mutex<bool>, Condvar)>,
 }
 impl SkyCurrentStreamSender {
     fn is_closed(&self) -> bool {
-        self.sender_tx.is_closed() || self.sender_termination_tx.is_closed()
+        self.sender_tx.is_closed()
     }
     /// Creates a brand new stream sender with its own sending thread.
     fn new(project_dir: impl AsRef<Path>) -> Self {
@@ -30,10 +30,11 @@ impl SkyCurrentStreamSender {
 
         // Channels for communication between threads and async context
         let (sender_tx, mut sender_rx) = mpsc::channel::<SendThreadMessage>(100);
-        let (sender_termination_tx, mut sender_termination_rx) = tokio::sync::mpsc::channel::<bool>(1);
+        let sender_termination_pair = Arc::new((Mutex::new(false), Condvar::new()));
 
         // Spawn sender thread
         let send_dir = project_dir;
+        let sender_termination_pair_thread = sender_termination_pair.clone();
         thread::spawn(move || {
             if let Err(e) = init(&send_dir, InitFlags::IOX2_CREAT_PUBLISHER | InitFlags::IOX2_CREAT_NOTIFIER) {
                 panic!("Failed to initialize sender thread: {:?}", e);
@@ -44,12 +45,15 @@ impl SkyCurrentStreamSender {
                 }
             }
             // Do this right before exiting to notify any on-lookers that the sender thread has exited.
-            sender_termination_rx.blocking_recv();
+            let (lock, cvar) = &*sender_termination_pair_thread;
+            let mut exited = lock.lock();
+            *exited = true;
+            cvar.notify_all();
         });
 
         Self {
             sender_tx,
-            sender_termination_tx,
+            sender_termination_pair,
         }
     }
     /// Get the global stream sender if it exists or initializes a new one if it doesn't.
@@ -79,7 +83,11 @@ impl SkyCurrentStreamSender {
         match self.sender_tx.send(SendThreadMessage::Terminate).await {
             Ok(_) => {
                 // Sender thread hasn't exited yet, but the signal has been sent, so the thread should eventually see it and exit. Wait for that to happen.
-                while let Ok(_) = self.sender_termination_tx.send(true).await {  }
+                let (lock, cvar) = &*self.sender_termination_pair;
+                let mut exited = lock.lock();
+                if !*exited {
+                    cvar.wait(&mut exited);
+                }
             },
             Err(_) => {
                 // Sender thread has already exited.
