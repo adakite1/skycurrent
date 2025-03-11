@@ -12,8 +12,6 @@ static GLOBAL_STREAM_SENDER: OnceLock<Arc<Mutex<SkyCurrentStreamSender>>> = Once
 static GLOBAL_LINK_MESSAGE_QUEUE: OnceLock<Arc<Mutex<LinkMessageQueue>>> = OnceLock::new();
 static GLOBAL_STREAM_RECEIVER: OnceLock<Arc<Mutex<SkyCurrentStreamReceiver>>> = OnceLock::new();
 
-//TODO: Check if the scenario of the receiver crashing is something that needs considering.
-
 /// Sets the global project directory.
 pub fn set_global_project_dir(project_dir: impl AsRef<Path>) {
     let project_dir = project_dir.as_ref();
@@ -32,9 +30,12 @@ enum SendThreadMessage {
 /// An asynchronous stream sender.
 pub struct SkyCurrentStreamSender {
     sender_tx: mpsc::Sender<SendThreadMessage>,
-    sender_termination_pair: Arc<(Mutex<bool>, Condvar)>,
 }
 impl SkyCurrentStreamSender {
+    /// Completes when the sender has closed.
+    pub async fn closed(&self) -> () {
+        self.sender_tx.closed().await
+    }
     fn is_closed(&self) -> bool {
         self.sender_tx.is_closed()
     }
@@ -44,11 +45,9 @@ impl SkyCurrentStreamSender {
 
         // Channels for communication between threads and async context
         let (sender_tx, mut sender_rx) = mpsc::channel::<SendThreadMessage>(100);
-        let sender_termination_pair = Arc::new((Mutex::new(false), Condvar::new()));
 
         // Spawn sender thread
         let send_dir = project_dir;
-        let sender_termination_pair_thread = sender_termination_pair.clone();
         thread::spawn(move || {
             if let Err(e) = init(&send_dir, InitFlags::IOX2_CREAT_PUBLISHER | InitFlags::IOX2_CREAT_NOTIFIER) {
                 panic!("Failed to initialize sender thread: {:?}", e);
@@ -71,16 +70,10 @@ impl SkyCurrentStreamSender {
                     None => break,
                 }
             }
-            // Do this right before exiting to notify any on-lookers that the sender thread has exited.
-            let (lock, cvar) = &*sender_termination_pair_thread;
-            let mut exited = lock.lock();
-            *exited = true;
-            cvar.notify_all();
         });
 
         Self {
             sender_tx,
-            sender_termination_pair,
         }
     }
     /// Get the global stream sender if it exists or initializes a new one if it doesn't.
@@ -123,11 +116,7 @@ impl SkyCurrentStreamSender {
         match self.sender_tx.send(SendThreadMessage::Terminate).await {
             Ok(_) => {
                 // Sender thread hasn't exited yet, but the signal has been sent, so the thread should eventually see it and exit. Wait for that to happen.
-                let (lock, cvar) = &*self.sender_termination_pair;
-                let mut exited = lock.lock();
-                if !*exited {
-                    cvar.wait(&mut exited);
-                }
+                self.closed().await;
             },
             Err(_) => {
                 // Sender thread has already exited.
@@ -153,10 +142,15 @@ impl SkyCurrentStreamSender {
 /// An asynchronous stream receiver.
 pub struct SkyCurrentStreamReceiver {
     receiver_rx: mpsc::Receiver<()>,
-    receiver_ipc_termination_pair: Arc<(Mutex<bool>, Condvar)>,
-    receiver_push_termination_pair: Arc<(Mutex<bool>, Condvar)>,
+    notify_tx: mpsc::Sender<()>,
+    receiver_ipc_thread_handle: Option<thread::JoinHandle<()>>,
+    receiver_push_thread_handle: Option<thread::JoinHandle<()>>,
 }
 impl SkyCurrentStreamReceiver {
+    /// Completes when the receiver has closed.
+    pub async fn closed(&self) -> () {
+        self.notify_tx.closed().await
+    }
     fn is_closed(&self) -> bool {
         self.receiver_rx.is_closed()
     }
@@ -170,16 +164,14 @@ impl SkyCurrentStreamReceiver {
         // Channels for thread communication - one for commands to the thread
         // and one for the IPC thread to send back received messages to the push thread
         let (receiver_tx, receiver_rx) = mpsc::channel::<()>(1);  // Used purely for signaling, can have a buffer size of just 1.
+        let (notify_tx, mut notify_rx) = mpsc::channel::<()>(1);  // Used purely for signaling, can have a buffer size of just 1.
         let (message_tx, mut message_rx) = mpsc::channel::<Vec<u8>>(100);
-        let receiver_ipc_termination_pair = Arc::new((Mutex::new(false), Condvar::new()));
-        let receiver_push_termination_pair = Arc::new((Mutex::new(false), Condvar::new()));
         
         // Spawn the IPC thread
         let recv_dir = project_dir;
-        let receiver_ipc_termination_pair_thread = receiver_ipc_termination_pair.clone();
         let signaling_tx = receiver_tx.clone();
         let mut should_collect_clone = should_collect.clone();
-        thread::spawn(move || {
+        let receiver_ipc_thread_handle = thread::spawn(move || {
             // Initialize IPC for this thread
             if let Err(e) = init(&recv_dir, InitFlags::IOX2_CREAT_SUBSCRIBER | InitFlags::IOX2_CREAT_LISTENER) {
                 panic!("Failed to initialize receiver thread: {:?}", e);
@@ -216,17 +208,11 @@ impl SkyCurrentStreamReceiver {
                     }
                 }
             }
-            // Do this right before exiting to notify any on-lookers that the receiver IPC thread has exited.
-            let (lock, cvar) = &*receiver_ipc_termination_pair_thread;
-            let mut exited = lock.lock();
-            *exited = true;
-            cvar.notify_all();
         });
 
         // Spawn the push thread
-        let receiver_push_termination_pair_thread = receiver_push_termination_pair.clone();
         let signaling_tx = receiver_tx.clone();
-        thread::spawn(move || {
+        let receiver_push_thread_handle = thread::spawn(move || {
             let queue = GLOBAL_LINK_MESSAGE_QUEUE.get_or_init(|| Arc::new(Mutex::new(LinkMessageQueue::new())));
             loop {
                 // Check the control channel.
@@ -243,17 +229,15 @@ impl SkyCurrentStreamReceiver {
                     None => break,
                 }
             }
-            // Do this right before exiting to notify any on-lookers that the receiver push thread has exited.
-            let (lock, cvar) = &*receiver_push_termination_pair_thread;
-            let mut exited = lock.lock();
-            *exited = true;
-            cvar.notify_all();
+            // The important thing here is that we move `notify_rx` inside of the thread so that no matter if we panic or exit normally, the main thread will know we've exited and get signalled for it.
+            notify_rx.close();
         });
         
         Self {
             receiver_rx,
-            receiver_ipc_termination_pair,
-            receiver_push_termination_pair,
+            notify_tx,
+            receiver_ipc_thread_handle: Some(receiver_ipc_thread_handle),
+            receiver_push_thread_handle: Some(receiver_push_thread_handle),
         }
     }
     /// Get the global stream receiver if it exists or initializes a new one if it doesn't.
@@ -308,16 +292,16 @@ impl SkyCurrentStreamReceiver {
             panic!("Error while trying to send signal to close receiver IPC thread: {:?}", e);
         }
         // Wait for IPC thread to exit.
-        let (lock, cvar) = &*self.receiver_ipc_termination_pair;
-        let mut exited = lock.lock();
-        if !*exited {
-            cvar.wait(&mut exited);
+        if let Some(handle) = self.receiver_ipc_thread_handle.take() {
+            if let Err(e) = handle.join() {
+                eprintln!("Receiver IPC thread exited with an error: {:?}", e);
+            }
         }
         // Wait for push thread to exit.
-        let (lock, cvar) = &*self.receiver_push_termination_pair;
-        let mut exited = lock.lock();
-        if !*exited {
-            cvar.wait(&mut exited);
+        if let Some(handle) = self.receiver_push_thread_handle.take() {
+            if let Err(e) = handle.join() {
+                eprintln!("Receiver push thread exited with an error: {:?}", e);
+            }
         }
         Ok(())
     }
