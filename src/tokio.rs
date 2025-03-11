@@ -5,10 +5,12 @@ use std::thread;
 
 pub use tokio::sync::mpsc::error::SendError;
 
-use crate::{init, send_stream, shutdown_signal, InitFlags};
+use crate::{init, send_stream, shutdown_signal, try_recv_stream, wait_stream, InitFlags, TryRecvStreamResult};
 
 static GLOBAL_PROJECT_DIR: OnceLock<Arc<Mutex<Option<PathBuf>>>> = OnceLock::new();
 static GLOBAL_STREAM_SENDER: OnceLock<Arc<Mutex<SkyCurrentStreamSender>>> = OnceLock::new();
+static GLOBAL_LINK_MESSAGE_QUEUE: OnceLock<Arc<Mutex<LinkMessageQueue>>> = OnceLock::new();
+static GLOBAL_STREAM_RECEIVER: OnceLock<Arc<Mutex<SkyCurrentStreamReceiver>>> = OnceLock::new();
 
 /// Sets the global project directory.
 pub fn set_global_project_dir(project_dir: impl AsRef<Path>) {
@@ -138,6 +140,188 @@ impl SkyCurrentStreamSender {
     pub async fn send_stream(&self, payload: Vec<u8>, header_size: usize) -> Result<(), SendError<Vec<u8>>> {
         self.sender_tx.send(SendThreadMessage::Send{ payload, header_size }).await
             .map_err(|e| if let SendThreadMessage::Send { payload, header_size: _ } = e.0 { SendError(payload) } else { panic!("this should never happen.") })
+    }
+    pub(crate) async fn send_shutdown_signal(&self) -> Result<(), SendError<()>> {
+        self.sender_tx.send(SendThreadMessage::ShutdownSignal).await
+            .map_err(|_| SendError(()))
+    }
+}
+
+pub struct SkyCurrentStreamReceiver {
+    receiver_rx: mpsc::Receiver<()>,
+    receiver_ipc_termination_pair: Arc<(Mutex<bool>, Condvar)>,
+    receiver_push_termination_pair: Arc<(Mutex<bool>, Condvar)>,
+}
+impl SkyCurrentStreamReceiver {
+    fn is_closed(&self) -> bool {
+        self.receiver_rx.is_closed()
+    }
+    /// Creates a brand new stream receiver with its own IPC and push threads.
+    fn new<F>(project_dir: impl AsRef<Path>, mut should_collect: F) -> Self 
+    where
+        F: FnMut(&[u8]) -> bool + Send + 'static,
+    {
+        let project_dir = project_dir.as_ref().to_path_buf();
+        
+        // Channels for thread communication - one for commands to the thread
+        // and one for the IPC thread to send back received messages to the push thread
+        let (receiver_tx, receiver_rx) = mpsc::channel::<()>(1);  // Used purely for signaling, can have a buffer size of just 1.
+        let (message_tx, mut message_rx) = mpsc::channel::<Vec<u8>>(100);
+        let receiver_ipc_termination_pair = Arc::new((Mutex::new(false), Condvar::new()));
+        let receiver_push_termination_pair = Arc::new((Mutex::new(false), Condvar::new()));
+        
+        // Spawn the IPC thread
+        let recv_dir = project_dir;
+        let receiver_ipc_termination_pair_thread = receiver_ipc_termination_pair.clone();
+        let signaling_tx = receiver_tx.clone();
+        thread::spawn(move || {
+            // Initialize IPC for this thread
+            if let Err(e) = init(&recv_dir, InitFlags::IOX2_CREAT_SUBSCRIBER | InitFlags::IOX2_CREAT_LISTENER) {
+                panic!("Failed to initialize receiver thread: {:?}", e);
+            }
+            loop {
+                // Check the control channel.
+                if signaling_tx.is_closed() {
+                    // For the receiver, instead of a termination message, we signal closing using a closed mpsc channel.
+                    break;
+                }  // Otherwise, if the sending part of the signaling channel is still open, then we keep going.
+                // Try to receive a merged message.
+                match try_recv_stream(|header| should_collect(header)) {
+                    Ok(try_recv_stream_result) => {
+                        match try_recv_stream_result {
+                            TryRecvStreamResult::NewMerge(merged_message) => {
+                                // If we successfully received a message, send it to the push thread.
+                                if message_tx.blocking_send(merged_message).is_err() {
+                                    // The channel was closed, meaning the push receiver is being shut down. We should shut down too.
+                                    break;
+                                }
+                            },
+                            TryRecvStreamResult::PagesStillPotentiallyAvailable => {
+                                continue;
+                            },
+                            TryRecvStreamResult::OutOfAccessiblePages => {
+                                if let Err(e) = wait_stream() {
+                                    panic!("Error while waiting in receiver thread: {:?}", e);
+                                }
+                            },
+                        }
+                    },
+                    Err(e) => {
+                        panic!("Error in receiver thread: {:?}", e);
+                    }
+                }
+            }
+            // Do this right before exiting to notify any on-lookers that the receiver IPC thread has exited.
+            let (lock, cvar) = &*receiver_ipc_termination_pair_thread;
+            let mut exited = lock.lock();
+            *exited = true;
+            cvar.notify_all();
+        });
+
+        // Spawn the push thread
+        let receiver_push_termination_pair_thread = receiver_push_termination_pair.clone();
+        let signaling_tx = receiver_tx.clone();
+        thread::spawn(move || {
+            let queue = GLOBAL_LINK_MESSAGE_QUEUE.get_or_init(|| Arc::new(Mutex::new(LinkMessageQueue::new())));
+            loop {
+                // Check the control channel.
+                if signaling_tx.is_closed() {
+                    // For the receiver, instead of a termination message, we signal closing using a closed mpsc channel.
+                    break;
+                }  // Otherwise, if the sending part of the signaling channel is still open, then we keep going.
+                // Receive a merged message from the IPC channel to push.
+                // When the IPC thread exits this will unblock, so we will exit with it.
+                match message_rx.blocking_recv() {
+                    Some(message) => {
+                        queue.lock().push(message);
+                    },
+                    None => break,
+                }
+            }
+            // Do this right before exiting to notify any on-lookers that the receiver push thread has exited.
+            let (lock, cvar) = &*receiver_push_termination_pair_thread;
+            let mut exited = lock.lock();
+            *exited = true;
+            cvar.notify_all();
+        });
+        
+        Self {
+            receiver_rx,
+            receiver_ipc_termination_pair,
+            receiver_push_termination_pair,
+        }
+    }
+    /// Get the global stream receiver if it exists or initializes a new one if it doesn't.
+    /// 
+    /// Note that `get_or_init` will always block and only return once the global stream receiver is in a ready state.
+    /// 
+    /// # Panics
+    /// 
+    /// Panics if `set_global_project_dir` has not been called beforehand! Use it to set the global project directory first.
+    pub fn get_or_init<F>(should_collect: F) -> parking_lot::lock_api::MutexGuard<'static, parking_lot::RawMutex, SkyCurrentStreamReceiver> 
+    where
+        F: FnMut(&[u8]) -> bool + Send + 'static + Clone,
+    {
+        let project_dir;
+        if let Some(global_project_dir) = GLOBAL_PROJECT_DIR.get() {
+            if let Some(global_project_dir) = global_project_dir.lock().as_ref() {
+                project_dir = global_project_dir.clone();
+            } else {
+                panic!("call `set_global_project_dir` first! (2)");
+            }
+        } else {
+            panic!("call `set_global_project_dir` first! (1)");
+        }
+        let lock = GLOBAL_STREAM_RECEIVER.get_or_init(|| Arc::new(Mutex::new(
+            SkyCurrentStreamReceiver::new(&project_dir, should_collect.clone())
+        )));
+        
+        // Get a reference to the existing global_stream_receiver.
+        let mut global_stream_receiver = lock.lock();
+        
+        // Check if the stream receiver is still open. If it is, we can stop here and just return the current global stream receiver.
+        if !global_stream_receiver.is_closed() {
+            return global_stream_receiver;
+        }
+        
+        // If the existing receiver is closed, create a new one.
+        *global_stream_receiver = SkyCurrentStreamReceiver::new(project_dir, should_collect);
+        global_stream_receiver
+    }    
+    /// Send termination signal to stream receiver and then wait for it to close.
+    pub async fn close(&mut self) -> tokio::io::Result<()> {
+        if self.is_closed() {
+            // Receiver threads are already exited.
+            return Ok(());
+        }
+        // Send termination signal to both threads by closing the signaling channel.
+        // Only the IPC thread is looking out for this, but that thread's exit should then prompt the push thread to exit too.
+        self.receiver_rx.close();
+        // It is likely that the IPC thread is currently sleeping, waiting on `wait_stream()`.
+        // Thus we get the global sender to send the shutdown signal to break it out of that.
+        if let Err(e) = SkyCurrentStreamSender::get_or_init().send_shutdown_signal().await {
+            panic!("Error while trying to send signal to close receiver IPC thread: {:?}", e);
+        }
+        // Wait for IPC thread to exit.
+        let (lock, cvar) = &*self.receiver_ipc_termination_pair;
+        let mut exited = lock.lock();
+        if !*exited {
+            cvar.wait(&mut exited);
+        }
+        // Wait for push thread to exit.
+        let (lock, cvar) = &*self.receiver_push_termination_pair;
+        let mut exited = lock.lock();
+        if !*exited {
+            cvar.wait(&mut exited);
+        }
+        Ok(())
+    }
+    /// Get an iterator over the message stream.
+    /// 
+    /// This returns a `MessageConsumer` that can be used to iterate through and process unclaimed incoming messages.
+    pub fn iter_stream(&self) -> MessageConsumer {
+        let queue = GLOBAL_LINK_MESSAGE_QUEUE.get_or_init(|| Arc::new(Mutex::new(LinkMessageQueue::new())));
+        queue.lock().create_consumer()
     }
 }
 
@@ -281,6 +465,20 @@ pub struct MessageConsumer {
     new_message_pair: Arc<(Mutex<u8>, Condvar)>,
 }
 impl MessageConsumer {
+    pub async fn next(&mut self) -> NextMessage {
+        loop {
+            // Try to get the next message.
+            if let Some(payload) = self.try_next() {
+                return payload;
+            }
+            
+            // No messages available, wait at the current position.
+            let (lock, cvar) = &*self.new_message_pair;
+            let mut wrapping_counter = lock.lock();
+            cvar.wait(&mut wrapping_counter);
+        }
+    }
+
     pub fn try_next(&mut self) -> Option<NextMessage> {
         let mut return_value = None;
         let mut move_to = None;
