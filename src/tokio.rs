@@ -1,19 +1,28 @@
-use std::{path::Path, sync::{Arc, OnceLock}};
+use std::{path::{Path, PathBuf}, sync::{Arc, OnceLock}};
 use parking_lot::{Condvar, Mutex, RwLock};
 use tokio::sync::mpsc;
 use std::thread;
 
 pub use tokio::sync::mpsc::error::SendError;
 
-use crate::{init, send_stream, InitFlags};
+use crate::{init, send_stream, shutdown_signal, InitFlags};
 
+static GLOBAL_PROJECT_DIR: OnceLock<Arc<Mutex<Option<PathBuf>>>> = OnceLock::new();
 static GLOBAL_STREAM_SENDER: OnceLock<Arc<Mutex<SkyCurrentStreamSender>>> = OnceLock::new();
+
+/// Sets the global project directory.
+pub fn set_global_project_dir(project_dir: impl AsRef<Path>) {
+    let project_dir = project_dir.as_ref();
+    let lock = GLOBAL_PROJECT_DIR.get_or_init(|| Arc::new(Mutex::new(None)));
+    *lock.lock() = Some(project_dir.to_path_buf());
+}
 
 enum SendThreadMessage {
     Send {
         payload: Vec<u8>,
         header_size: usize
     },
+    ShutdownSignal,
     Terminate
 }
 pub struct SkyCurrentStreamSender {
@@ -39,9 +48,22 @@ impl SkyCurrentStreamSender {
             if let Err(e) = init(&send_dir, InitFlags::IOX2_CREAT_PUBLISHER | InitFlags::IOX2_CREAT_NOTIFIER) {
                 panic!("Failed to initialize sender thread: {:?}", e);
             }
-            while let Some(SendThreadMessage::Send{ payload, header_size }) = sender_rx.blocking_recv() {
-                if let Err(e) = send_stream(&payload, header_size) {
-                    panic!("Error in sender thread: {:?}", e);
+            loop {
+                match sender_rx.blocking_recv() {
+                    Some(message) => match message {
+                        SendThreadMessage::Send { payload, header_size } => {
+                            if let Err(e) = send_stream(&payload, header_size) {
+                                panic!("Error in sender thread: {:?}", e);
+                            }
+                        },
+                        SendThreadMessage::ShutdownSignal => {
+                            if let Err(e) = shutdown_signal() {
+                                panic!("Error in sender thread: {:?}", e);
+                            }
+                        },
+                        SendThreadMessage::Terminate => break,
+                    },
+                    None => break,
                 }
             }
             // Do this right before exiting to notify any on-lookers that the sender thread has exited.
@@ -59,10 +81,23 @@ impl SkyCurrentStreamSender {
     /// Get the global stream sender if it exists or initializes a new one if it doesn't.
     /// 
     /// Note that `get_or_init` will always block and only return once the global stream sender is in a ready state.
-    pub fn get_or_init(project_dir: impl AsRef<Path>) -> parking_lot::lock_api::MutexGuard<'static, parking_lot::RawMutex, SkyCurrentStreamSender> {
-        let project_dir = project_dir.as_ref();
+    /// 
+    /// # Panics
+    /// 
+    /// Panics if `set_global_project_dir` has not been called beforehand! Use it to set the global project directory first.
+    pub fn get_or_init() -> parking_lot::lock_api::MutexGuard<'static, parking_lot::RawMutex, SkyCurrentStreamSender> {
+        let project_dir;
+        if let Some(global_project_dir) = GLOBAL_PROJECT_DIR.get() {
+            if let Some(global_project_dir) = global_project_dir.lock().as_ref() {
+                project_dir = global_project_dir.clone();
+            } else {
+                panic!("call `set_global_project_dir` first! (2)");
+            }
+        } else {
+            panic!("call `set_global_project_dir` first! (1)");
+        }
         let lock = GLOBAL_STREAM_SENDER.get_or_init(|| Arc::new(Mutex::new(
-            SkyCurrentStreamSender::new(project_dir)
+            SkyCurrentStreamSender::new(&project_dir)
         )));
 
         // Get a reference to the existing global_stream_sender.
