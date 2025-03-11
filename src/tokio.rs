@@ -12,6 +12,8 @@ static GLOBAL_STREAM_SENDER: OnceLock<Arc<Mutex<SkyCurrentStreamSender>>> = Once
 static GLOBAL_LINK_MESSAGE_QUEUE: OnceLock<Arc<Mutex<LinkMessageQueue>>> = OnceLock::new();
 static GLOBAL_STREAM_RECEIVER: OnceLock<Arc<Mutex<SkyCurrentStreamReceiver>>> = OnceLock::new();
 
+//TODO: Check if the scenario of the receiver crashing is something that needs considering.
+
 /// Sets the global project directory.
 pub fn set_global_project_dir(project_dir: impl AsRef<Path>) {
     let project_dir = project_dir.as_ref();
@@ -27,6 +29,7 @@ enum SendThreadMessage {
     ShutdownSignal,
     Terminate
 }
+/// An asynchronous stream sender.
 pub struct SkyCurrentStreamSender {
     sender_tx: mpsc::Sender<SendThreadMessage>,
     sender_termination_pair: Arc<(Mutex<bool>, Condvar)>,
@@ -147,6 +150,7 @@ impl SkyCurrentStreamSender {
     }
 }
 
+/// An asynchronous stream receiver.
 pub struct SkyCurrentStreamReceiver {
     receiver_rx: mpsc::Receiver<()>,
     receiver_ipc_termination_pair: Arc<(Mutex<bool>, Condvar)>,
@@ -157,9 +161,9 @@ impl SkyCurrentStreamReceiver {
         self.receiver_rx.is_closed()
     }
     /// Creates a brand new stream receiver with its own IPC and push threads.
-    fn new<F>(project_dir: impl AsRef<Path>, mut should_collect: F) -> Self 
+    fn new<F>(project_dir: impl AsRef<Path>, should_collect: F) -> Self 
     where
-        F: FnMut(&[u8]) -> bool + Send + 'static,
+        F: FnMut(&[u8]) -> bool + Send + 'static + Clone,
     {
         let project_dir = project_dir.as_ref().to_path_buf();
         
@@ -174,6 +178,7 @@ impl SkyCurrentStreamReceiver {
         let recv_dir = project_dir;
         let receiver_ipc_termination_pair_thread = receiver_ipc_termination_pair.clone();
         let signaling_tx = receiver_tx.clone();
+        let mut should_collect_clone = should_collect.clone();
         thread::spawn(move || {
             // Initialize IPC for this thread
             if let Err(e) = init(&recv_dir, InitFlags::IOX2_CREAT_SUBSCRIBER | InitFlags::IOX2_CREAT_LISTENER) {
@@ -186,7 +191,7 @@ impl SkyCurrentStreamReceiver {
                     break;
                 }  // Otherwise, if the sending part of the signaling channel is still open, then we keep going.
                 // Try to receive a merged message.
-                match try_recv_stream(|header| should_collect(header)) {
+                match try_recv_stream(|header| should_collect_clone(header)) {
                     Ok(try_recv_stream_result) => {
                         match try_recv_stream_result {
                             TryRecvStreamResult::NewMerge(merged_message) => {
@@ -358,6 +363,7 @@ impl NextMessage {
     fn is_claimed(&self) -> bool {
         self.payload.read().is_none()
     }
+    /// Read the message without claiming it. Will return `None` if the message has since been claimed.
     pub fn read(&self) -> Option<MessageRef> {
         let lock = self.payload.read();
         if lock.is_some() {
@@ -368,11 +374,13 @@ impl NextMessage {
             None
         }
     }
+    /// Claim the message and return the payload. Will return `None` if the message has since been claimed.
     pub fn claim(&mut self) -> Option<Vec<u8>> {
         self.payload.write().take()
     }
 }
 impl LinkMessageQueue {
+    /// Create a new `LinkMessageQueue` structure.
     pub fn new() -> Self {
         // Create empty tail node (serving as sentinel, indication is next=None)
         let tail = NextMessage {
@@ -395,7 +403,9 @@ impl LinkMessageQueue {
             new_message_pair: Arc::new((Mutex::new(0), Condvar::new())),
         }
     }
-
+    /// Push a message into the end of the queue.
+    /// 
+    /// Any currently blocked `MessageConsumer`'s will unblock at the new message.
     pub fn push(&mut self, payload: Vec<u8>) {
         // Create new message node.
         let new_node = Arc::new(Mutex::new(NextMessage {
@@ -449,7 +459,9 @@ impl LinkMessageQueue {
         *wrapping_counter = wrapping_counter.wrapping_add(1);
         cvar.notify_all();
     }
-
+    /// Create a new `MessageConsumer`.
+    /// 
+    /// The returned `MessageConsumer` is decoupled from the message queue and have distinct lifetimes.
     pub fn create_consumer(&self) -> MessageConsumer {
         MessageConsumer {
             current: self.root.clone(),
@@ -465,20 +477,11 @@ pub struct MessageConsumer {
     new_message_pair: Arc<(Mutex<u8>, Condvar)>,
 }
 impl MessageConsumer {
+    /// Asynchronously wait for the next message to arrive.
     pub async fn next(&mut self) -> NextMessage {
-        loop {
-            // Try to get the next message.
-            if let Some(payload) = self.try_next() {
-                return payload;
-            }
-            
-            // No messages available, wait at the current position.
-            let (lock, cvar) = &*self.new_message_pair;
-            let mut wrapping_counter = lock.lock();
-            cvar.wait(&mut wrapping_counter);
-        }
+        self.blocking_next()
     }
-
+    /// Attempt to return the next unclaimed message without blocking.
     pub fn try_next(&mut self) -> Option<NextMessage> {
         let mut return_value = None;
         let mut move_to = None;
@@ -620,8 +623,8 @@ impl MessageConsumer {
 
         return_value
     }
-
-    pub fn next_blocking(&mut self) -> NextMessage {
+    /// Block until the next unclaimed message arrives.
+    pub fn blocking_next(&mut self) -> NextMessage {
         loop {
             // Try to get the next message.
             if let Some(payload) = self.try_next() {
