@@ -5,24 +5,39 @@ edition = "2024"
 
 [dependencies]
 thiserror = "2"
-dunce = "1.0"
-bitflags = "2.9.0"
-bitvec = "1"
-rand = "0.9.0"
+dunce = { version = "1.0", optional = true }
+bitflags = { version = "2.9.0", optional = true }
+bitvec = { version = "1", optional = true }
+rand = { version = "0.9.0", optional = true }
 # iceoryx2 = { version = "0.5.0", features = ["logger_tracing"] }
 # iceoryx2-bb-system-types = "0.5.0"
 # iceoryx2-bb-container = "0.5.0"
-iceoryx2 = { git = "https://github.com/eclipse-iceoryx/iceoryx2.git", rev = "b7fc3bf" }
-iceoryx2-bb-system-types = { git = "https://github.com/eclipse-iceoryx/iceoryx2.git", rev = "b7fc3bf" }
-iceoryx2-bb-container = { git = "https://github.com/eclipse-iceoryx/iceoryx2.git", rev = "b7fc3bf" }
-iceoryx2-cal = { git = "https://github.com/eclipse-iceoryx/iceoryx2.git", rev = "b7fc3bf" }
+iceoryx2 = { git = "https://github.com/eclipse-iceoryx/iceoryx2.git", rev = "b7fc3bf", optional = true }
+iceoryx2-bb-system-types = { git = "https://github.com/eclipse-iceoryx/iceoryx2.git", rev = "b7fc3bf", optional = true }
+iceoryx2-bb-container = { git = "https://github.com/eclipse-iceoryx/iceoryx2.git", rev = "b7fc3bf", optional = true }
+iceoryx2-cal = { git = "https://github.com/eclipse-iceoryx/iceoryx2.git", rev = "b7fc3bf", optional = true }
 tokio = { version = "1.0", features = ["full"], optional = true }
-parking_lot = { version = "0.12", features = ["send_guard"], optional = true }
+parking_lot = { version = "0.12", features = ["send_guard"] }
 
 [dev-dependencies]
 tracing = "0.1"
 tracing-subscriber = "0.3.0"
 
 [features]
-default = ["tokio"]
-tokio = ["dep:tokio", "dep:parking_lot"]
+default = [
+    "tokio",
+    "backing-iox2"
+]
+tokio = [
+    "dep:tokio"
+]
+backing-iox2 = [
+    "dep:dunce",
+    "dep:bitflags",
+    "dep:bitvec",
+    "dep:rand",
+    "dep:iceoryx2", 
+    "dep:iceoryx2-bb-system-types", 
+    "dep:iceoryx2-bb-container", 
+    "dep:iceoryx2-cal"
+]
