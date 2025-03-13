@@ -459,12 +459,17 @@ pub fn wait_stream() -> Result<(), IpcError> {
 
 /// Sends a shutdown signal.
 /// 
-/// Note that this won't actually shut anything down! Uninitialization is done automatically when the thread upon which the instance of SkyCurrent is running exits normally.
+/// Note that this won't actually shut anything down! Do that by calling [`close`].
 /// 
 /// This simply causes certain blocking functions to return early. Most notably, `wait_stream` should return early when this signal is sent.
 pub fn shutdown_signal() -> Result<(), IpcError> {
     notify(0).map(|_| ())
 }
+
+/// Close SkyCurrent.
+/// 
+/// On some backings, this function is a no-op, but it should always be called before the thread using the library exits to give SkyCurrent a chance to clean up.
+pub fn close() -> Result<(), IpcError> { Ok(()) }
 
 /// Receive a payload of arbitrary size by fragmenting.
 /// 
