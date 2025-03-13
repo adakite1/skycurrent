@@ -1,10 +1,26 @@
-use std::{cell::{OnceCell, RefCell}, path::{Path, PathBuf}, sync::{mpsc::{self, Receiver, Sender}, Arc}, thread, time::Duration};
+use std::{cell::{OnceCell, RefCell}, path::{Path, PathBuf}, sync::{mpsc::{self, Receiver, Sender}, Arc}, thread::{self, JoinHandle}, time::Duration};
 
 use thiserror::Error;
 use bitflags::bitflags;
 use bitvec::prelude as bv;
 
 use super::common::TryRecvStreamResult;
+
+/// Macro to join an actor thread.
+macro_rules! actor_join {
+    ($join_handle:ident) => {
+        $join_handle.with_borrow_mut(|cell| {
+            if let Some(join_handle) = cell.take() {
+                if let Err(e) = join_handle.join() {
+                    eprintln!("{}: backing exited with panic: {:?}", stringify!($join_handle), e);
+                }
+                Ok(())
+            } else {
+                Err(IpcError::NotInitialized)
+            }
+        })
+    };
+}
 
 /// Macro to send a message to an actor thread and optionally wait for a response.
 /// 
@@ -84,7 +100,10 @@ enum Iox2BackingMessage {
 
 thread_local! {
     static GLOBAL_PROJECT_DIR: OnceCell<PathBuf> = OnceCell::new();
-    static IOX2_SENDER_TX: OnceCell<Sender<Iox2BackingMessage>> = OnceCell::new();
+    static IOX2_RECV_THREAD_JOIN_HANDLE: RefCell<Option<JoinHandle<()>>> = RefCell::new(None);
+    static IOX2_RECV_SENDER_TX: OnceCell<Sender<Iox2BackingMessage>> = OnceCell::new();
+    static IOX2_SEND_THREAD_JOIN_HANDLE: RefCell<Option<JoinHandle<()>>> = RefCell::new(None);
+    static IOX2_SEND_SENDER_TX: OnceCell<Sender<Iox2BackingMessage>> = OnceCell::new();
     static WAIT_STREAM_LOCKS: RefCell<bv::BitVec> = RefCell::new(bv::bitvec![0; Backing::_Count as usize]);
     static WAIT_STREAM_RECEIVER: OnceCell<Receiver<Result<Backing, IpcError>>> = OnceCell::new();
 }
@@ -94,26 +113,18 @@ bitflags! {
     /// 
     /// The following flags are currently supported:
     /// 
-    /// - [`InitFlags::INIT_RECV`]                (0b00000001): Initialize for receiving.
-    /// - [`InitFlags::INIT_SEND`]               (0b00000010): Initialize for sending.
-    /// - [`InitFlags::INIT_IOX2`]               (0b0000000100000000): Initialize the iceoryx2 backing.
-    /// - [`InitFlags::INIT_WS_GATEWAY`]         (0b0000001000000000): Initialize the websocket gateway backing.
-    /// - [`InitFlags::INIT_WS_LEAF`]            (0b0000010000000000): Initialize the websocket leaf backing. (WASM target only!)
+    /// - [`InitFlags::INIT_IOX2_RECV`]          (0b00000001): Initialize for receiving on the iceoryx2 backing.
+    /// - [`InitFlags::INIT_IOX2_SEND`]          (0b00000010): Initialize for sending on the iceoryx2 backing.
+    /// - [`InitFlags::INIT_WS_GATEWAY`]         (0b00000100): Initialize the websocket gateway backing.
     pub struct InitFlags: u32 {
-        /// Initialize for receiving.
-        const INIT_RECV = 0b00000001;
+        /// Initialize for receiving on the iceoryx2 backing.
+        const INIT_IOX2_RECV = 0b00000001;
 
-        /// Initialize for sending.
-        const INIT_SEND = 0b00000010;
-
-        /// Initialize the iceoryx2 backing.
-        const INIT_IOX2 = 0b0000000100000000;
+        /// Initialize for sending on the iceoryx2 backing.
+        const INIT_IOX2_SEND = 0b00000010;
 
         /// Initialize the websocket gateway backing.
-        const INIT_WS_GATEWAY = 0b0000001000000000;
-
-        /// Initialize the websocket leaf backing. (WASM target only!)
-        const INIT_WS_LEAF = 0b0000010000000000;
+        const INIT_WS_GATEWAY = 0b00000100;
     }
 }
 
@@ -162,24 +173,9 @@ pub fn init(flags: InitFlags) -> Result<(), InitError> {
 
     // Initialize iceoryx2 backing.
     #[cfg(feature = "backing-iox2")]
-    if flags.intersects(InitFlags::INIT_IOX2) {
-        let iox2_flags = if flags.intersects(InitFlags::INIT_RECV) {
-            super::iox2::InitFlags::IOX2_CREAT_SUBSCRIBER | super::iox2::InitFlags::IOX2_CREAT_LISTENER
-        } else {
-            super::iox2::InitFlags::empty()
-        } | if flags.intersects(InitFlags::INIT_SEND) {
-            super::iox2::InitFlags::IOX2_CREAT_PUBLISHER | super::iox2::InitFlags::IOX2_CREAT_NOTIFIER
-        } else {
-            super::iox2::InitFlags::empty()
-        };
-
-        if let Some(global_project_dir) = project_dir.as_ref() {
-            // Create communication channels.
-            let (sender_tx, sender_rx) = mpsc::channel::<Iox2BackingMessage>();
-            let respond_to_wait_stream = wait_stream_tx.clone();
-
-            // Create thread.
-            thread::spawn(move || {
+    {
+        let build_actor_main_loop = |sender_rx: Receiver<Iox2BackingMessage>, respond_to_wait_stream: Option<Sender<Result<Backing, IpcError>>>| {
+            move || {
                 // Listen for calls.
                 // Note that although this is technically a separate thread, every time it enters work it expects the main thread to lock with it, meaning there is no parallel execution here.
                 // This also means that conceptually, there is no paralle processing, and a crash within this thread should be propagated out into the main thread.
@@ -192,7 +188,11 @@ pub fn init(flags: InitFlags) -> Result<(), InitError> {
                             respond_to.send(super::iox2::try_recv_stream(should_collect));
                         },
                         Iox2BackingMessage::WaitStream => {
-                            respond_to_wait_stream.send(super::iox2::wait_stream().map(|_| Backing::Iox2).map_err(|e| IpcError::Iox2IpcError(e)));
+                            if let Some(respond_to_wait_stream) = respond_to_wait_stream.as_ref() {
+                                respond_to_wait_stream.send(super::iox2::wait_stream().map(|_| Backing::Iox2).map_err(|e| IpcError::Iox2IpcError(e)));
+                            } else {
+                                panic!("this should never happen.");
+                            }
                         },
                         Iox2BackingMessage::ShutdownSignal { respond_to } => {
                             respond_to.send(super::iox2::shutdown_signal());
@@ -206,18 +206,60 @@ pub fn init(flags: InitFlags) -> Result<(), InitError> {
                         },
                     }
                 }
-            });
+            }
+        };
+        if let Some(global_project_dir) = project_dir.as_ref() {
+            if flags.intersects(InitFlags::INIT_IOX2_RECV) {
+                let iox2_flags = super::iox2::InitFlags::IOX2_CREAT_SUBSCRIBER | super::iox2::InitFlags::IOX2_CREAT_LISTENER;
+    
+                // Create communication channels.
+                let (sender_tx, sender_rx) = mpsc::channel::<Iox2BackingMessage>();
+                let respond_to_wait_stream = wait_stream_tx.clone();
+    
+                // Create thread.
+                let join_handle = thread::spawn(build_actor_main_loop(sender_rx, Some(respond_to_wait_stream)));
+                
+                // Store the join handle.
+                IOX2_RECV_THREAD_JOIN_HANDLE.with_borrow_mut(|cell| {
+                    *cell = Some(join_handle);
+                });
 
-            // Initialize.
-            let (send, recv) = mpsc::channel();
-            if let Err(_) = sender_tx.send(Iox2BackingMessage::Init { path: global_project_dir.clone(), flags: iox2_flags, respond_to: send }) { panic!("'iox2' backing has crashed."); }
-            recv.recv().expect("'iox2' backing has crashed.")?;
-            drop(recv);
+                // Initialize.
+                let (send, recv) = mpsc::channel();
+                if let Err(_) = sender_tx.send(Iox2BackingMessage::Init { path: global_project_dir.clone(), flags: iox2_flags, respond_to: send }) { panic!("'iox2' backing has crashed."); }
+                recv.recv().expect("'iox2' backing has crashed.")?;
+                drop(recv);
+    
+                // Store the sender.
+                IOX2_RECV_SENDER_TX.with(|cell| {
+                    cell.get_or_init(|| sender_tx);
+                });
+            }
+            if flags.intersects(InitFlags::INIT_IOX2_SEND) {
+                let iox2_flags = super::iox2::InitFlags::IOX2_CREAT_PUBLISHER | super::iox2::InitFlags::IOX2_CREAT_NOTIFIER;
+    
+                // Create communication channels.
+                let (sender_tx, sender_rx) = mpsc::channel::<Iox2BackingMessage>();
+    
+                // Create thread.
+                let join_handle = thread::spawn(build_actor_main_loop(sender_rx, None));
+    
+                // Store the join handle.
+                IOX2_SEND_THREAD_JOIN_HANDLE.with_borrow_mut(|cell| {
+                    *cell = Some(join_handle);
+                });
 
-            // Store the sender.
-            IOX2_SENDER_TX.with(|cell| {
-                cell.get_or_init(|| sender_tx);
-            });
+                // Initialize.
+                let (send, recv) = mpsc::channel();
+                if let Err(_) = sender_tx.send(Iox2BackingMessage::Init { path: global_project_dir.clone(), flags: iox2_flags, respond_to: send }) { panic!("'iox2' backing has crashed."); }
+                recv.recv().expect("'iox2' backing has crashed.")?;
+                drop(recv);
+    
+                // Store the sender.
+                IOX2_SEND_SENDER_TX.with(|cell| {
+                    cell.get_or_init(|| sender_tx);
+                });
+            }
         } else {
             return Err(InitError::MissingGlobalProjectDirectory(String::from("iox2")));
         }
@@ -259,7 +301,7 @@ pub fn try_recv_stream<I: FnMut(&[u8]) -> bool + Send + 'static + Clone>(should_
     let try_recv_stream = |backing: Backing, should_collect: Box<I>| {
         let (send, recv) = mpsc::channel();
         match backing {
-            Backing::Iox2 => actor_call!(IOX2_SENDER_TX, Iox2BackingMessage::TryRecvStream { should_collect, respond_to: send }, recv),
+            Backing::Iox2 => actor_call!(IOX2_RECV_SENDER_TX, Iox2BackingMessage::TryRecvStream { should_collect, respond_to: send }, recv),
             Backing::_Count => panic!("this should never happen."),
         }
     };
@@ -314,27 +356,17 @@ pub fn try_recv_stream<I: FnMut(&[u8]) -> bool + Send + 'static + Clone>(should_
 /// 
 /// # Implementation Notes
 /// 
-/// Internally, calling this function will always cause every backing to get blocked on their own `wait_stream` functions.
+/// Internally, calling this function will always cause every receiver backing to get blocked on their own `wait_stream` functions.
 /// 
-/// Then, once any one of them returns [`wait_stream`] also returns.
-/// 
-/// However, notice that this means once [`wait_stream`] is called, all other methods will lock until all backings get out of their respective `wait_stream` functions.
-/// 
-/// This is intentional behavior. While inconvenient, it is out of necessity since methods like [`send_stream`], [`shutdown_signal`], or [`close`] all do not make logical sense unless they make sure all backings see and respond to the message.
-/// 
-/// An exception can be made for [`try_recv_stream`] however.
-/// 
-/// Both these methods will, instead of asking every single backing for a new message, only ask those ones which are not currently blocked on `wait_stream`.
-/// 
-/// In practice then, this means that just like when using each of the backends individually, users should send and receive on different threads when using the combined API as well.
+/// Thus, [`try_recv_stream`] will only ask those backings which are not currently blocked on `wait_stream` for new messages.
 pub fn wait_stream() -> Result<(), IpcError> {
     // We avoid calling `wait_stream` on backings that we know are still blocked on it.
     // We also send the requests out first, potentially missing out on backings that are now free to process the request because we want as fewest number of threads stuck at `wait_stream` as possible. This makes a cleaner exit for each thread more likely, though it's only an extra precaution in practice because the shutdown signal exists.
     WAIT_STREAM_LOCKS.with_borrow_mut(|cell| -> Result<(), IpcError> {
-        // Backing::Iox2
+        // IOX2_RECV_SENDER_TX
         if !cell[Backing::Iox2 as usize] {
             cell.set(Backing::Iox2 as usize, true);
-            actor_call!(IOX2_SENDER_TX, Iox2BackingMessage::WaitStream)?;
+            actor_call!(IOX2_RECV_SENDER_TX, Iox2BackingMessage::WaitStream)?;
         }
 
         Ok(())
@@ -389,9 +421,9 @@ fn wait_stream_drain() -> Result<(), IpcError> {
 /// 
 /// This simply causes certain blocking functions to return early. Most notably, [`wait_stream`] should return early when this signal is sent.
 pub fn shutdown_signal() -> Result<(), IpcError> {
-    // Backing::Iox2
+    // IOX2_SEND_SENDER_TX
     let (send, recv) = mpsc::channel();
-    actor_call!(IOX2_SENDER_TX, Iox2BackingMessage::ShutdownSignal { respond_to: send }, recv)?;
+    actor_call!(IOX2_SEND_SENDER_TX, Iox2BackingMessage::ShutdownSignal { respond_to: send }, recv)?;
 
     Ok(())
 }
@@ -400,9 +432,15 @@ pub fn shutdown_signal() -> Result<(), IpcError> {
 /// 
 /// On some backings, this function is a no-op, but it should always be called before the thread using the library exits to give SkyCurrent a chance to clean up.
 pub fn close() -> Result<(), IpcError> {
-    // Backing::Iox2
+    // IOX2_RECV_SENDER_TX
     let (send, recv) = mpsc::channel();
-    actor_call!(IOX2_SENDER_TX, Iox2BackingMessage::Close { respond_to: send }, recv)?;
+    actor_call!(IOX2_RECV_SENDER_TX, Iox2BackingMessage::Close { respond_to: send }, recv)?;
+    actor_join!(IOX2_RECV_THREAD_JOIN_HANDLE)?;
+
+    // IOX2_SEND_SENDER_TX
+    let (send, recv) = mpsc::channel();
+    actor_call!(IOX2_SEND_SENDER_TX, Iox2BackingMessage::Close { respond_to: send }, recv)?;
+    actor_join!(IOX2_SEND_THREAD_JOIN_HANDLE)?;
 
     Ok(())
 }
@@ -437,9 +475,9 @@ pub fn recv_stream<I: FnMut(&[u8]) -> bool + Send + 'static + Clone>(should_coll
 pub fn send_stream(payload: &[u8], header_size: usize) -> Result<(), IpcError> {
     let payload: Arc<[u8]> = Arc::from(payload);
 
-    // Backing::Iox2
+    // IOX2_SEND_SENDER_TX
     let (send, recv) = mpsc::channel();
-    actor_call!(IOX2_SENDER_TX, Iox2BackingMessage::SendStream { payload: payload.clone(), header_size, respond_to: send }, recv)?;
+    actor_call!(IOX2_SEND_SENDER_TX, Iox2BackingMessage::SendStream { payload: payload.clone(), header_size, respond_to: send }, recv)?;
 
     Ok(())
 }
