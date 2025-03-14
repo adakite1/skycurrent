@@ -6,18 +6,16 @@ use thiserror::Error;
 /// 
 /// Symbol `IpcError::NotInitialized` must be within scope.
 macro_rules! actor_join {
-    ($join_handle:ident) => {
-        $join_handle.with_borrow_mut(|cell| {
-            if let Some(join_handle) = cell.take() {
-                if let Err(e) = join_handle.join() {
-                    eprintln!("{}: backing exited with panic: {:?}", stringify!($join_handle), e);
-                }
-                Ok(())
-            } else {
-                Err(IpcError::NotInitialized)
+    ($join_handle:ident) => {{
+        if let Some(join_handle) = $join_handle.lock().take() {
+            if let Err(e) = join_handle.join() {
+                eprintln!("{}: backing exited with panic: {:?}", stringify!($join_handle), e);
             }
-        })
-    };
+            Ok(())
+        } else {
+            Err(IpcError::NotInitialized)
+        }
+    }};
 }
 pub(crate) use actor_join;
 
@@ -34,6 +32,61 @@ pub(crate) use actor_join;
 /// - [`Result<(), E>`] where E is an [`IpcError`].
 /// - [`Result<T, E>`] where T is the response type from the actor and E is an [`IpcError`] if `$recv` is provided.
 macro_rules! actor_call {
+    ($sender_tx:ident, $message_expr:expr) => {{
+        if let Some(sender_tx) = $sender_tx.read().as_ref() {
+            if let Err(_) = sender_tx.send($message_expr) {
+                panic!("{}: backing has crashed.", stringify!($sender_tx));
+            }
+            Ok(())
+        } else {
+            Err(IpcError::NotInitialized)
+        }
+    }};
+    ($sender_tx:ident, $message_expr:expr, $recv:ident) => {{
+        if let Some(sender_tx) = $sender_tx.read().as_ref() {
+            if let Err(_) = sender_tx.send($message_expr) {
+                panic!("{}: backing has crashed.", stringify!($sender_tx));
+            }
+            Ok($recv.recv().expect(&format!("{}: backing has crashed.", stringify!($sender_tx)))?)
+        } else {
+            Err(IpcError::NotInitialized)
+        }
+    }};
+}
+pub(crate) use actor_call;
+
+/// Macro to join an actor thread with a thread-local join handle.
+/// 
+/// Symbol `IpcError::NotInitialized` must be within scope.
+macro_rules! actor_join_tl {
+    ($join_handle:ident) => {
+        $join_handle.with_borrow_mut(|cell| {
+            if let Some(join_handle) = cell.take() {
+                if let Err(e) = join_handle.join() {
+                    eprintln!("{}: backing exited with panic: {:?}", stringify!($join_handle), e);
+                }
+                Ok(())
+            } else {
+                Err(IpcError::NotInitialized)
+            }
+        })
+    };
+}
+pub(crate) use actor_join_tl;
+
+/// Macro to send a message to an actor thread with a thread-local Sender and optionally wait for a response.
+/// 
+/// Symbol `IpcError::NotInitialized` must be within scope.
+/// 
+/// # Parameters
+/// - `$sender_tx`: The thread-local static sender variable to use.
+/// - `$message_expr`: The expression that constructs the message to send.
+/// - `$recv`: The `mpsc` channel to wait for a response on.
+/// 
+/// # Returns
+/// - [`Result<(), E>`] where E is an [`IpcError`].
+/// - [`Result<T, E>`] where T is the response type from the actor and E is an [`IpcError`] if `$recv` is provided.
+macro_rules! actor_call_tl {
     ($sender_tx:ident, $message_expr:expr) => {
         $sender_tx.with(|cell| {
             if let Some(sender_tx) = cell.get() {
@@ -59,24 +112,24 @@ macro_rules! actor_call {
         })
     };
 }
-pub(crate) use actor_call;
+pub(crate) use actor_call_tl;
 
 /// Possible errors during initialization.
-#[derive(Error, Debug)]
+#[derive(Error, Debug, Clone)]
 pub enum InitError {
     /// Expected a project folder, but instead was provided with a path that does not exist or is not a folder.
     #[error("the provided path '{0}' for initializing SkyCurrent does not exist or is not a folder!")]
     NotAFolder(PathBuf),
     /// Could not canonicalize the provided project path.
     #[error("failed to canonicalize the provided project root path '{0}': {1}")]
-    FailedToCanonicalizeProjectPath(PathBuf, std::io::Error),
+    FailedToCanonicalizeProjectPath(PathBuf, std::io::ErrorKind),
     /// Could not create a folder.
     #[error("failed to create directory at '{0}': {1}")]
-    CreateDirError(PathBuf, std::io::Error),
+    CreateDirError(PathBuf, std::io::ErrorKind),
     /// Failed to bind to address.
     #[cfg(feature = "tokio")]
     #[error("failed to bind to address")]
-    TcpListenerBindError(#[from] tokio::io::Error),
+    TcpListenerBindError(tokio::io::ErrorKind),
 }
 
 pub(crate) struct ProjectDirectoryPaths {
@@ -90,15 +143,15 @@ pub(crate) fn build_project_dir_structure(path: &Path) -> Result<ProjectDirector
         return Err(InitError::NotAFolder(path.to_path_buf()));
     }
     // Canonicalize the project folder path.
-    let path = dunce::canonicalize(path).map_err(|e| InitError::FailedToCanonicalizeProjectPath(path.to_path_buf(), e))?;
+    let path = dunce::canonicalize(path).map_err(|e| InitError::FailedToCanonicalizeProjectPath(path.to_path_buf(), e.kind()))?;
 
     // Set up common temporary directories.
     //  The res/ directory is for things that should not be checked into git but still makes sense to be kept around for a long time.
     //  The tmp/ directory is for things that should not be checked into git as they are temporary files.
     let res = path.join("res");
     let tmp = path.join("tmp");
-    std::fs::create_dir_all(&res).map_err(|e| InitError::CreateDirError(res.to_path_buf(), e))?;
-    std::fs::create_dir_all(&tmp).map_err(|e| InitError::CreateDirError(tmp.to_path_buf(), e))?;
+    std::fs::create_dir_all(&res).map_err(|e| InitError::CreateDirError(res.to_path_buf(), e.kind()))?;
+    std::fs::create_dir_all(&tmp).map_err(|e| InitError::CreateDirError(tmp.to_path_buf(), e.kind()))?;
 
     Ok(ProjectDirectoryPaths {
         root: path,
@@ -109,11 +162,11 @@ pub(crate) fn build_project_dir_structure(path: &Path) -> Result<ProjectDirector
 
 #[cfg(feature = "tokio")]
 pub(crate) async fn bind_tcp_listener<A: tokio::net::ToSocketAddrs>(addr: A) -> Result<tokio::net::TcpListener, InitError> {
-    tokio::net::TcpListener::bind(addr).await.map_err(|e| InitError::TcpListenerBindError(e))
+    tokio::net::TcpListener::bind(addr).await.map_err(|e| InitError::TcpListenerBindError(e.kind()))
 }
 
 /// Interruption signals that might possibly be received.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub enum InterruptSignals {
     /// A `SIGINT` signal was received.
     Interrupt,

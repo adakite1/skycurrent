@@ -73,17 +73,17 @@ bitflags! {
 }
 
 /// Possible errors during initialization.
-#[derive(Error, Debug)]
+#[derive(Error, Debug, Clone)]
 pub enum InitError {
     /// Encountered an initialization error in the common code.
     #[error("encountered an initialization error in the common code")]
     CommonInitError(#[from] super::common::InitError),
     /// Could not create a folder.
     #[error("failed to create iceoryx2 root directory at '{0}': {1}")]
-    CreateIox2RootError(PathBuf, std::io::Error),
+    CreateIox2RootError(PathBuf, std::io::ErrorKind),
     /// Failed to write the IPC config file.
     #[error("failed to write the IPC config file '{0}': {1}")]
-    Iox2WriteIpcConfigError(PathBuf, std::io::Error),
+    Iox2WriteIpcConfigError(PathBuf, std::io::ErrorKind),
     /// Failed to create iceoryx2 node for IPC.
     #[error("failed to create iceoryx2 node")]
     Iox2NodeCreationFailure(#[from] iceoryx2::node::NodeCreationFailure),
@@ -121,7 +121,7 @@ pub fn init(path: &Path, flags: InitFlags) -> Result<(), InitError> {
     // IPC setup
     // Set up a root directory for iceoryx2.
     let root = tmp.join("iox2");
-    std::fs::create_dir_all(&root).map_err(|e| InitError::CreateIox2RootError(root.to_path_buf(), e))?;
+    std::fs::create_dir_all(&root).map_err(|e| InitError::CreateIox2RootError(root.to_path_buf(), e.kind()))?;
 
     // Set up the global configuration file for iceoryx2 if it does not already exist.
     let config_path = tmp.join("iox2.toml");
@@ -188,7 +188,7 @@ event-id-max-value                          = 4294967295
             unix = if cfg!(unix) { root.to_string_lossy().to_string() } else { String::new() },
             windows = if cfg!(windows) { root.to_string_lossy().to_string() } else { String::new() }
             );
-        std::fs::write(&config_path, config).map_err(|e| InitError::Iox2WriteIpcConfigError(config_path.to_path_buf(), e))?;
+        std::fs::write(&config_path, config).map_err(|e| InitError::Iox2WriteIpcConfigError(config_path.to_path_buf(), e.kind()))?;
     }
 
     // Start ipc.
@@ -252,7 +252,7 @@ event-id-max-value                          = 4294967295
 }
 
 /// Possible errors during normal operations.
-#[derive(Error, Debug)]
+#[derive(Error, Debug, Clone)]
 pub enum IpcError {
     /// IPC not initialized on this thread.
     #[error("SkyCurrent is not initialized on this thread - call `init` first")]
@@ -473,7 +473,7 @@ pub fn close() -> Result<(), IpcError> { Ok(()) }
 
 /// Receive a payload of arbitrary size by fragmenting.
 /// 
-/// Note that since this requires assembly of data on the receiver-side, the `should_collect` callback is supplied with the header of each incoming chunk so that it may indicate whether it wants to collect said chunk and start a local merge.
+/// Since this requires assembly of data on the receiver-side, the `should_collect` callback is supplied with the header of each incoming chunk so that it may indicate whether it wants to collect said chunk and start a local merge.
 /// 
 /// This function blocks until it successfully finishes merging a message, returning that merged message as the result.
 pub fn recv_stream<I: FnMut(&[u8]) -> bool>(mut should_collect: I) -> Result<Vec<u8>, IpcError> {
