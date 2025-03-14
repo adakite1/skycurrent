@@ -1,4 +1,4 @@
-use std::{path::{Path, PathBuf}, sync::{Arc, LazyLock}, thread::{self, JoinHandle}, time::Duration};
+use std::{cell::LazyCell, path::{Path, PathBuf}, sync::{Arc, LazyLock}, thread::{self, JoinHandle}, time::Duration};
 
 use parking_lot::{Mutex, RwLock};
 use thiserror::Error;
@@ -406,33 +406,24 @@ pub fn send_stream(payload: &[u8], header_size: usize) -> Result<(), IpcError> {
     Ok(())
 }
 
-/// Blocking version of [`wait_stream`].
-/// 
-/// # Panics
-///
-/// This function panics if called within an asynchronous execution context.
-pub fn blocking_wait_stream() -> Result<(), IpcError> {
-    // Create a new runtime.
-    let rt = tokio::runtime::Builder::new_current_thread()
+thread_local! {
+    static TOKIO_RT: LazyCell<tokio::runtime::Runtime> = LazyCell::new(|| tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .unwrap();
+        .expect("this should never happen."));
+}
 
-    rt.block_on(wait_stream())
+/// Blocking version of [`wait_stream`].
+pub fn blocking_wait_stream() -> Result<(), IpcError> {
+    TOKIO_RT.with(|cell| {
+        cell.block_on(wait_stream())
+    })
 }
 
 /// Blocking version of [`recv_stream`].
-/// 
-/// # Panics
-///
-/// This function panics if called within an asynchronous execution context.
 pub fn blocking_recv_stream<I: FnMut(&[u8]) -> bool + Send + 'static + Clone>(should_collect: I) -> Result<Vec<u8>, IpcError> {
-    // Create a new runtime.
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-
-    rt.block_on(recv_stream(should_collect))
+    TOKIO_RT.with(|cell| {
+        cell.block_on(recv_stream(should_collect))
+    })
 }
 
