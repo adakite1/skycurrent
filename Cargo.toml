@@ -9,16 +9,18 @@ dunce = { version = "1.0", optional = true }
 bitflags = { version = "2.9.0", optional = true }
 bitvec = "1"
 rand = { version = "0.9.0", optional = true }
+postage = { version = "0.5", optional = true }
 crossbeam = "0.8"
-# iceoryx2 = { version = "0.5.0", features = ["logger_tracing"] }
-# iceoryx2-bb-system-types = "0.5.0"
-# iceoryx2-bb-container = "0.5.0"
 iceoryx2 = { git = "https://github.com/eclipse-iceoryx/iceoryx2.git", rev = "b7fc3bf", optional = true }
 iceoryx2-bb-system-types = { git = "https://github.com/eclipse-iceoryx/iceoryx2.git", rev = "b7fc3bf", optional = true }
 iceoryx2-bb-container = { git = "https://github.com/eclipse-iceoryx/iceoryx2.git", rev = "b7fc3bf", optional = true }
 iceoryx2-cal = { git = "https://github.com/eclipse-iceoryx/iceoryx2.git", rev = "b7fc3bf", optional = true }
 tokio = { version = "1.0", features = ["sync"], optional = true, default-features = false }
 parking_lot = { version = "0.12", features = ["send_guard"] }
+hyper = { version = "1", features = ["full"], optional = true }
+http-body-util = { version = "0.1", optional = true }
+hyper-util = { version = "0.1", features = ["full"], optional = true }
+fastwebsockets = { version = "0.10", features = ["upgrade"], optional = true }
 
 [dev-dependencies]
 tracing = "0.1"
@@ -27,7 +29,8 @@ tracing-subscriber = "0.3.0"
 [features]
 default = [
     "tokio",
-    "backing-iox2"
+    "backing-iox2",
+    "backing-ws-gateway"
 ]
 tokio = [
     "dep:tokio",
@@ -41,4 +44,12 @@ backing-iox2 = [
     "dep:iceoryx2-bb-system-types", 
     "dep:iceoryx2-bb-container", 
     "dep:iceoryx2-cal"
+]
+backing-ws-gateway = [
+    "tokio",
+    "dep:postage",
+    "dep:hyper",
+    "dep:http-body-util",
+    "dep:hyper-util",
+    "dep:fastwebsockets"
 ]
