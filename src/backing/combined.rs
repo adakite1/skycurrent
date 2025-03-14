@@ -406,3 +406,33 @@ pub fn send_stream(payload: &[u8], header_size: usize) -> Result<(), IpcError> {
     Ok(())
 }
 
+/// Blocking version of [`wait_stream`].
+/// 
+/// # Panics
+///
+/// This function panics if called within an asynchronous execution context.
+pub fn blocking_wait_stream() -> Result<(), IpcError> {
+    // Create a new runtime.
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    rt.block_on(wait_stream())
+}
+
+/// Blocking version of [`recv_stream`].
+/// 
+/// # Panics
+///
+/// This function panics if called within an asynchronous execution context.
+pub fn blocking_recv_stream<I: FnMut(&[u8]) -> bool + Send + 'static + Clone>(should_collect: I) -> Result<Vec<u8>, IpcError> {
+    // Create a new runtime.
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    rt.block_on(recv_stream(should_collect))
+}
+
