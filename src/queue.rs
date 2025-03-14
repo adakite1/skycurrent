@@ -1,13 +1,14 @@
 use std::sync::Arc;
 
-use parking_lot::{Condvar, Mutex, RwLock};
+use parking_lot::{Mutex, RwLock};
+use tokio::sync::Notify;
 
 /// A message queue based upon a linked list so that consuming iterators can decide to process any message atomically and independent of other consumers, who might be looking at a different set of messages.
 pub struct LinkMessageQueue {
     root: Arc<Mutex<NextMessage>>,
     last: Arc<Mutex<NextMessage>>,
     tail: Arc<Mutex<NextMessage>>,
-    new_message_pair: Arc<(Mutex<u8>, Condvar)>,
+    new_message_notify: Arc<Notify>,
 }
 /// Smart pointer referencing the `Vec<u8>` payload inside of a stored element, guarded by a mutex for a temporary view of the data.
 pub struct MessageRef<'a> {
@@ -29,7 +30,7 @@ impl<'a> std::ops::Deref for MessageRef<'a> {
 #[derive(Clone)]
 pub struct NextMessage {
     payload: Arc<RwLock<Option<Vec<u8>>>>,
-    next: Option<Arc<Mutex<NextMessage>>>
+    next: Option<Arc<Mutex<NextMessage>>>,
 }
 impl NextMessage {
     fn is_claimed(&self) -> bool {
@@ -72,7 +73,7 @@ impl LinkMessageQueue {
             root: root_arc.clone(),
             last: root_arc,
             tail: tail_arc,
-            new_message_pair: Arc::new((Mutex::new(0), Condvar::new())),
+            new_message_notify: Arc::new(Notify::new()),
         }
     }
     /// Push a message into the end of the queue.
@@ -126,10 +127,7 @@ impl LinkMessageQueue {
         self.last = new_node;
 
         // Notify waiting consumers.
-        let (lock, cvar) = &*self.new_message_pair;
-        let mut wrapping_counter = lock.lock();
-        *wrapping_counter = wrapping_counter.wrapping_add(1);
-        cvar.notify_all();
+        self.new_message_notify.notify_waiters();
     }
     /// Create a new `MessageConsumer`.
     /// 
@@ -137,7 +135,7 @@ impl LinkMessageQueue {
     pub fn create_consumer(&self) -> MessageConsumer {
         MessageConsumer {
             current: self.root.clone(),
-            new_message_pair: self.new_message_pair.clone(),
+            new_message_notify: self.new_message_notify.clone(),
         }
     }
 }
@@ -146,12 +144,24 @@ impl LinkMessageQueue {
 /// Each unclaimed message is visited once and in order of arrival.
 pub struct MessageConsumer {
     current: Arc<Mutex<NextMessage>>,
-    new_message_pair: Arc<(Mutex<u8>, Condvar)>,
+    new_message_notify: Arc<Notify>,
 }
 impl MessageConsumer {
     /// Asynchronously wait for the next message to arrive.
     pub async fn next(&mut self) -> NextMessage {
-        self.blocking_next()
+        loop {
+            // Get a `Notified` in case we do not find a message in the next part.
+            let notify = self.new_message_notify.clone();
+            let notified = notify.notified();
+
+            // Try to get the next message.
+            if let Some(payload) = self.try_next() {
+                return payload;
+            }
+            
+            // No messages available, wait at the current position.
+            notified.await;
+        }
     }
     /// Attempt to return the next unclaimed message without blocking.
     pub fn try_next(&mut self) -> Option<NextMessage> {
@@ -297,17 +307,16 @@ impl MessageConsumer {
     }
     /// Block until the next unclaimed message arrives.
     pub fn blocking_next(&mut self) -> NextMessage {
-        loop {
-            // Try to get the next message.
-            if let Some(payload) = self.try_next() {
-                return payload;
-            }
-            
-            // No messages available, wait at the current position.
-            let (lock, cvar) = &*self.new_message_pair;
-            let mut wrapping_counter = lock.lock();
-            cvar.wait(&mut wrapping_counter);
-        }
+        TOKIO_RT.with(|cell| {
+            cell.block_on(self.next())
+        })
     }
+}
+
+thread_local! {
+    static TOKIO_RT: std::cell::LazyCell<tokio::runtime::Runtime>  = std::cell::LazyCell::new(|| tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("this should never happen."));
 }
 
