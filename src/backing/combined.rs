@@ -4,60 +4,7 @@ use thiserror::Error;
 use bitflags::bitflags;
 use bitvec::prelude as bv;
 
-use super::common::TryRecvStreamResult;
-
-/// Macro to join an actor thread.
-macro_rules! actor_join {
-    ($join_handle:ident) => {
-        $join_handle.with_borrow_mut(|cell| {
-            if let Some(join_handle) = cell.take() {
-                if let Err(e) = join_handle.join() {
-                    eprintln!("{}: backing exited with panic: {:?}", stringify!($join_handle), e);
-                }
-                Ok(())
-            } else {
-                Err(IpcError::NotInitialized)
-            }
-        })
-    };
-}
-
-/// Macro to send a message to an actor thread and optionally wait for a response.
-/// 
-/// # Parameters
-/// - `$sender_tx`: The thread-local static sender variable to use.
-/// - `$message_expr`: The expression that constructs the message to send.
-/// - `$recv`: The `mpsc` channel to wait for a response on.
-/// 
-/// # Returns
-/// - [`Result<(), E>`] where E is an [`IpcError`].
-/// - [`Result<T, E>`] where T is the response type from the actor and E is an [`IpcError`] if `$recv` is provided.
-macro_rules! actor_call {
-    ($sender_tx:ident, $message_expr:expr) => {
-        $sender_tx.with(|cell| {
-            if let Some(sender_tx) = cell.get() {
-                if let Err(_) = sender_tx.send($message_expr) {
-                    panic!("{}: backing has crashed.", stringify!($sender_tx));
-                }
-                Ok(())
-            } else {
-                Err(IpcError::NotInitialized)
-            }
-        })
-    };
-    ($sender_tx:ident, $message_expr:expr, $recv:ident) => {
-        $sender_tx.with(|cell| {
-            if let Some(sender_tx) = cell.get() {
-                if let Err(_) = sender_tx.send($message_expr) {
-                    panic!("{}: backing has crashed.", stringify!($sender_tx));
-                }
-                Ok($recv.recv().expect(&format!("{}: backing has crashed.", stringify!($sender_tx)))?)
-            } else {
-                Err(IpcError::NotInitialized)
-            }
-        })
-    };
-}
+use super::common::{actor_call, actor_join, TryRecvStreamResult};
 
 #[derive(Clone, Copy)]
 #[repr(u8)]

@@ -2,6 +2,65 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
+/// Macro to join an actor thread.
+/// 
+/// Symbol `IpcError::NotInitialized` must be within scope.
+macro_rules! actor_join {
+    ($join_handle:ident) => {
+        $join_handle.with_borrow_mut(|cell| {
+            if let Some(join_handle) = cell.take() {
+                if let Err(e) = join_handle.join() {
+                    eprintln!("{}: backing exited with panic: {:?}", stringify!($join_handle), e);
+                }
+                Ok(())
+            } else {
+                Err(IpcError::NotInitialized)
+            }
+        })
+    };
+}
+pub(crate) use actor_join;
+
+/// Macro to send a message to an actor thread and optionally wait for a response.
+/// 
+/// Symbol `IpcError::NotInitialized` must be within scope.
+/// 
+/// # Parameters
+/// - `$sender_tx`: The thread-local static sender variable to use.
+/// - `$message_expr`: The expression that constructs the message to send.
+/// - `$recv`: The `mpsc` channel to wait for a response on.
+/// 
+/// # Returns
+/// - [`Result<(), E>`] where E is an [`IpcError`].
+/// - [`Result<T, E>`] where T is the response type from the actor and E is an [`IpcError`] if `$recv` is provided.
+macro_rules! actor_call {
+    ($sender_tx:ident, $message_expr:expr) => {
+        $sender_tx.with(|cell| {
+            if let Some(sender_tx) = cell.get() {
+                if let Err(_) = sender_tx.send($message_expr) {
+                    panic!("{}: backing has crashed.", stringify!($sender_tx));
+                }
+                Ok(())
+            } else {
+                Err(IpcError::NotInitialized)
+            }
+        })
+    };
+    ($sender_tx:ident, $message_expr:expr, $recv:ident) => {
+        $sender_tx.with(|cell| {
+            if let Some(sender_tx) = cell.get() {
+                if let Err(_) = sender_tx.send($message_expr) {
+                    panic!("{}: backing has crashed.", stringify!($sender_tx));
+                }
+                Ok($recv.recv().expect(&format!("{}: backing has crashed.", stringify!($sender_tx)))?)
+            } else {
+                Err(IpcError::NotInitialized)
+            }
+        })
+    };
+}
+pub(crate) use actor_call;
+
 /// Possible errors during initialization.
 #[derive(Error, Debug)]
 pub enum InitError {
@@ -14,7 +73,12 @@ pub enum InitError {
     /// Could not create a folder.
     #[error("failed to create directory at '{0}': {1}")]
     CreateDirError(PathBuf, std::io::Error),
+    /// Failed to bind to address.
+    #[cfg(feature = "tokio")]
+    #[error("failed to bind to address")]
+    TcpListenerBindError(#[from] tokio::io::Error),
 }
+
 pub(crate) struct ProjectDirectoryPaths {
     pub root: PathBuf,
     pub res: PathBuf,
@@ -41,6 +105,11 @@ pub(crate) fn build_project_dir_structure(path: &Path) -> Result<ProjectDirector
         res,
         tmp,
     })
+}
+
+#[cfg(feature = "tokio")]
+pub(crate) async fn bind_tcp_listener<A: tokio::net::ToSocketAddrs>(addr: A) -> Result<tokio::net::TcpListener, InitError> {
+    tokio::net::TcpListener::bind(addr).await.map_err(|e| InitError::TcpListenerBindError(e))
 }
 
 /// Interruption signals that might possibly be received.
