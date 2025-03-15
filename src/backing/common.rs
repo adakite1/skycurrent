@@ -191,3 +191,12 @@ pub enum TryRecvStreamResult {
     OutOfAccessible
 }
 
+/// Return value on `try_recv_copy` success.
+#[derive(Debug)]
+pub enum TryRecvCopyResult {
+    /// A new message has been received.
+    NewMessage(Vec<u8>),
+    /// Out of any accessible messages to get for now.
+    OutOfAccessible
+}
+

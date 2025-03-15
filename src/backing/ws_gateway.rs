@@ -6,14 +6,15 @@ use hyper::{body::{Bytes, Incoming}, server::conn::http1, service::service_fn, R
 use parking_lot::{Mutex, RwLock};
 use postage::{broadcast, sink::Sink, stream::Stream};
 use thiserror::Error;
-use tokio::{io, sync::mpsc};
+use tokio::io;
 
 use crate::backing::common::bind_tcp_listener;
 
-use super::common::TryRecvStreamResult;
+use super::common::TryRecvCopyResult;
 
 const GATEWAY_PORT: usize = 8367;
 const ALLOWED_ORIGINS: &[&str] = &[
+    "null",
     "http://127.0.0.1",
     "http://localhost",
 ];
@@ -22,11 +23,11 @@ static BROADCAST_CHANNEL: LazyLock<RwLock<broadcast::Sender<Vec<u8>>>> = LazyLoc
     let (tx, _) = broadcast::channel(100);
     RwLock::new(tx)
 });
-static RECEIVING_CHANNEL_TX: OnceLock<RwLock<mpsc::Sender<Vec<u8>>>> = OnceLock::new();
-static RECEIVING_CHANNEL_RX: OnceLock<Mutex<mpsc::Receiver<Vec<u8>>>> = OnceLock::new();
+static RECEIVING_CHANNEL_TX: OnceLock<RwLock<broadcast::Sender<Vec<u8>>>> = OnceLock::new();
+static RECEIVING_CHANNEL_RX: OnceLock<Mutex<broadcast::Receiver<Vec<u8>>>> = OnceLock::new();
 
 /// Possible errors during initialization.
-#[derive(Error, Debug)]
+#[derive(Error, Debug, Clone)]
 pub enum InitError {
     /// Encountered an initialization error in the common code.
     #[error("encountered an initialization error in the common code")]
@@ -36,9 +37,12 @@ pub enum InitError {
 /// 
 /// If [`init`] has already been called once before for this thread, this is a no-op.
 pub async fn init() -> Result<(), InitError> {
+    if RECEIVING_CHANNEL_TX.get().is_some() {
+        return Ok(());
+    }
     match bind_tcp_listener(format!("0.0.0.0:{}", GATEWAY_PORT)).await {
         Ok(listener) => {
-            let (tx, rx) = mpsc::channel(100);
+            let (tx, rx) = broadcast::channel(100);
             
             RECEIVING_CHANNEL_TX.get_or_init(|| RwLock::new(tx));
             RECEIVING_CHANNEL_RX.get_or_init(|| Mutex::new(rx));
@@ -92,7 +96,7 @@ async fn handle_client(fut: upgrade::UpgradeFut) -> Result<(), WebSocketError> {
     let mut ws = fastwebsockets::FragmentCollector::new(fut.await?);
 
     let mut broadcast_subscriber = BROADCAST_CHANNEL.read().subscribe();
-    let message_forwarder;
+    let mut message_forwarder;
     if let Some(receiving_channel) = RECEIVING_CHANNEL_TX.get() {
         message_forwarder = receiving_channel.read().clone();
     } else {
@@ -114,7 +118,7 @@ async fn handle_client(fut: upgrade::UpgradeFut) -> Result<(), WebSocketError> {
             }
             payload = broadcast_subscriber.recv() => {
                 let payload = payload.expect("broadcast source should not drop until thread itself exits. this should never happen.");
-
+                
                 ws.write_frame(Frame::binary(payload.into())).await?;
             }
         }
@@ -124,7 +128,7 @@ async fn handle_client(fut: upgrade::UpgradeFut) -> Result<(), WebSocketError> {
 }
 
 /// Possible errors during normal operations.
-#[derive(Error, Debug)]
+#[derive(Error, Debug, Clone)]
 pub enum IpcError {
     /// IPC not initialized on this thread.
     #[error("SkyCurrent is not initialized on this thread - call `init` first")]
@@ -134,18 +138,32 @@ pub enum IpcError {
 /// Try to receive a payload of arbitrary size.
 /// 
 /// This function never blocks, instead attempting to get a single accessible message, then returning immediately.
-pub fn try_recv_copy() -> Result<TryRecvStreamResult, IpcError> {
+pub fn try_recv_copy() -> Result<TryRecvCopyResult, IpcError> {
     if let Some(receiving_channel_rx) = RECEIVING_CHANNEL_RX.get() {
         match receiving_channel_rx.lock().try_recv() {
-            Ok(payload) => Ok(TryRecvStreamResult::NewCompleted(payload)),
+            Ok(payload) => {
+                Ok(TryRecvCopyResult::NewMessage(payload))
+            },
             Err(e) => match e {
-                mpsc::error::TryRecvError::Empty => Ok(TryRecvStreamResult::OutOfAccessible),
-                mpsc::error::TryRecvError::Disconnected => panic!("a sender is always kept undropped as a global variable, so a disconnect should not happen until the entire thread exits. this should never happen."),
+                postage::stream::TryRecvError::Pending => Ok(TryRecvCopyResult::OutOfAccessible),
+                postage::stream::TryRecvError::Closed => panic!("a sender is always kept undropped as a global variable, so a disconnect should not happen until the entire thread exits. this should never happen."),
             },
         }
     } else {
         Err(IpcError::NotInitialized)
     }
+}
+
+/// Wait until new item is available on stream asynchronously.
+pub async fn wait_stream() -> Result<(), IpcError> {
+    let mut message_receiver;
+    if let Some(receiving_channel) = RECEIVING_CHANNEL_TX.get() {
+        message_receiver = receiving_channel.read().subscribe();
+    } else {
+        return Err(IpcError::NotInitialized);
+    }
+    message_receiver.recv().await;
+    Ok(())
 }
 
 /// Receive a payload of arbitrary size asynchronously.
@@ -167,6 +185,17 @@ pub fn close() {  }
 
 /// Send a payload of arbitrary size.
 pub fn send_copy(payload: Vec<u8>) {
-    let _ = BROADCAST_CHANNEL.write().send(payload);
+    let _ = BROADCAST_CHANNEL.write().blocking_send(payload);
+}
+
+pub(crate) fn send_copy_to_self(payload: Vec<u8>) -> Result<(), IpcError> {
+    let mut message_forwarder;
+    if let Some(receiving_channel) = RECEIVING_CHANNEL_TX.get() {
+        message_forwarder = receiving_channel.read().clone();
+    } else {
+        return Err(IpcError::NotInitialized);
+    }
+    message_forwarder.blocking_send(payload).expect("receiving channel should not drop until thread itself exits. this should never happen.");
+    Ok(())
 }
 
