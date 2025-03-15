@@ -7,6 +7,8 @@ use rand::Rng;
 use thiserror::Error;
 use bitflags::bitflags;
 
+use crate::hasher::IdentityHash;
+
 use super::common::ProjectDirectoryPaths;
 
 /// Maximum message size in bytes.
@@ -29,7 +31,7 @@ thread_local! {
     static IOX2_SERVICE_PUB_SUB: OnceCell<iceoryx2::service::port_factory::publish_subscribe::PortFactory<ipc::Service, Blob<PRESET_N>, ()>> = OnceCell::new();
     static IOX2_PUB: OnceCell<iceoryx2::port::publisher::Publisher<ipc::Service, Blob<PRESET_N>, ()>> = OnceCell::new();
     static IOX2_SUB: OnceCell<iceoryx2::port::subscriber::Subscriber<ipc::Service, Blob<PRESET_N>, ()>> = OnceCell::new();
-    static MERGE_ALLOCS: RefCell<HashMap<u64, (bv::BitVec, usize, Vec<u8>)>> = RefCell::new(HashMap::new());
+    static MERGE_ALLOCS: RefCell<HashMap<u64, (bv::BitVec, usize, Vec<u8>), IdentityHash>> = RefCell::new(HashMap::with_hasher(IdentityHash::default()));
 }
 
 /// A simple binary blob with N bytes in it.

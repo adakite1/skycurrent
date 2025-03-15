@@ -11,7 +11,7 @@ use std::sync::{LazyLock, Weak};
 use std::collections::HashMap;
 
 #[cfg(feature = "autodrop")]
-static ACTIVE_MESSAGE_CONSUMERS: LazyLock<RwLock<HashMap<u64, Weak<MessageConsumer>>>> = LazyLock::new(|| RwLock::new(HashMap::new()));
+static ACTIVE_MESSAGE_CONSUMERS: LazyLock<RwLock<HashMap<u64, Weak<MessageConsumer>, crate::hasher::IdentityHash>>> = LazyLock::new(|| RwLock::new(HashMap::with_hasher(crate::hasher::IdentityHash::default())));
 
 /// A message queue based upon a linked list so that consuming iterators can decide to process any message atomically and independent of other consumers, who might be looking at a different set of messages.
 pub struct LinkMessageQueue {
@@ -42,7 +42,7 @@ pub struct NextMessage {
     payload: Arc<RwLock<Option<Vec<u8>>>>,
     next: Option<Arc<Mutex<NextMessage>>>,
     #[cfg(feature = "autodrop")]
-    target_consumers: Option<HashMap<u64, Weak<MessageConsumer>>>,
+    target_consumers: Option<HashMap<u64, Weak<MessageConsumer>, crate::hasher::IdentityHash>>,
 }
 impl NextMessage {
     fn is_claimed(&self) -> bool {
