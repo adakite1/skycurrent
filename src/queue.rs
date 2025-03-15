@@ -274,19 +274,18 @@ impl MessageConsumer {
         {
             // Lock the current node.
             let mut current = self.current.lock();
+
+            #[cfg(feature = "autodrop")]
+            {
+                // Remove self from target consumers, then check if message should be autodropped once that is done.
+                check_should_now_autodrop(self.id, &mut current);
+            }
+
             // Lock the current node's message, as per [3]. Use the strictest lock (write lock) so that during the pruning operation, the current node cannot be claimed. Technically a read lock also works here but this is an important invariant.
             let current_payload = current.payload.clone();
             let current_payload_rw_lock = current_payload.write();
             // Then check the claim status.
             let current_is_claimed = current_payload_rw_lock.is_none();
-
-            #[cfg(feature = "autodrop")]
-            {
-                // Remove self from target consumers, then check if message should be autodropped once that is done.
-                if !current_is_claimed {
-                    check_should_now_autodrop(self.id, &mut current);
-                }
-            }
 
             // Get a copy of the next node.
             let mut next = current.next.clone();
