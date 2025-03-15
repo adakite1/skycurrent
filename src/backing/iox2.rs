@@ -347,7 +347,7 @@ fn notify(event_id: usize) -> Result<usize, IpcError> {
 
 /// Try to receive a payload of arbitrary size by fragmenting.
 /// 
-/// Note that since this requires assembly of data on the receiver-side, the `should_collect` callback is supplied with the header of each incoming chunk so that it may indicate whether it wants to collect said chunk and start a local merge.
+/// Since this requires assembly of data on the receiver-side, the `should_collect` callback provided is supplied with the header of each incoming chunk so that it may indicate whether it wants to collect said chunk and start a local merge.
 /// 
 /// This function never blocks, instead attempting to get a single accessible page and merging it if told to do so, then returning immediately.
 pub fn try_recv_stream<I: FnMut(&[u8]) -> bool>(mut should_collect: I) -> Result<super::common::TryRecvStreamResult, IpcError> {
@@ -497,7 +497,7 @@ pub fn recv_stream<I: FnMut(&[u8]) -> bool>(mut should_collect: I) -> Result<Vec
 
 /// Send an arbitrarily-sized payload by fragmenting.
 /// 
-/// Note that since this requires assembly of data on the receiver-side, all payloads should have a small header section so that receivers can decide if they want to reconstruct the message or pass on it, saving memory and execution time.
+/// Since this requires assembly of data on the receiver-side, all payloads should have a small header section so that receivers can decide if they want to reconstruct the message or pass on it, saving memory and execution time.
 /// 
 /// The `header_size` specifies how many bytes from the head of the payload corresponds to the header; every fragment sent will include the header but have different sections of the body.
 pub fn send_stream(payload: &[u8], header_size: usize) -> Result<(), IpcError> {

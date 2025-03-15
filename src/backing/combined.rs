@@ -37,7 +37,7 @@ enum Iox2BackingMessage {
         respond_to: crossbeam::channel::Sender<Result<(), super::iox2::InitError>>,
     },
     TryRecvStream {
-        should_collect: Box<dyn FnMut(&[u8]) -> bool + Send + 'static>,
+        should_collect: ShouldCollectCallback,
         respond_to: crossbeam::channel::Sender<Result<super::common::TryRecvStreamResult, super::iox2::IpcError>>,
     },
     WaitStream,
@@ -54,7 +54,11 @@ enum Iox2BackingMessage {
     },
 }
 
+pub type ShouldCollectCallback = fn(&[u8]) -> bool;
+
 static GLOBAL_PROJECT_DIR: LazyLock<Mutex<Option<PathBuf>>> = LazyLock::new(|| Mutex::new(None));
+static GLOBAL_SHOULD_COLLECT: LazyLock<Mutex<Option<ShouldCollectCallback>>> = LazyLock::new(|| Mutex::new(None));
+
 static IOX2_RECV_THREAD_JOIN_HANDLE: LazyLock<Mutex<Option<JoinHandle<()>>>> = LazyLock::new(|| Mutex::new(None));
 static IOX2_RECV_SENDER_TX: LazyLock<RwLock<Option<crossbeam::channel::Sender<Iox2BackingMessage>>>> = LazyLock::new(|| RwLock::new(None));
 static IOX2_SEND_THREAD_JOIN_HANDLE: LazyLock<Mutex<Option<JoinHandle<()>>>> = LazyLock::new(|| Mutex::new(None));
@@ -85,6 +89,11 @@ bitflags! {
 /// Sets the global project directory, required for certain backings.
 pub fn set_global_project_dir(project_dir: impl AsRef<Path>) {
     *GLOBAL_PROJECT_DIR.lock() = Some(project_dir.as_ref().to_path_buf());
+}
+
+/// Sets the global `should_collect` callback, required for certain backings.
+pub fn set_global_should_collect(should_collect: ShouldCollectCallback) {
+    *GLOBAL_SHOULD_COLLECT.lock() = Some(should_collect);
 }
 
 /// Possible errors during initialization.
@@ -211,6 +220,9 @@ pub enum IpcError {
     /// IPC not initialized on this thread.
     #[error("SkyCurrent is not initialized on this thread - call `init` first")]
     NotInitialized,
+    /// Some of the enabled backings require a global `should_collect` callback to be set. Set one with [`set_global_should_collect`] first before calling [`try_recv_stream`] or [`recv_stream`].
+    #[error("backing {0:?} requires a global `should_collect` callback! set one with `set_global_should_collect` first before calling `try_recv_stream` or `recv_stream`")]
+    MissingGlobalShouldCollect(String),
     /// Backing crashed during call.
     #[error("{0}: backing crashed during call")]
     BackingCrashed(&'static str),
@@ -224,7 +236,7 @@ static CURRENT_BACKING: LazyLock<Mutex<(Backing, std::time::Instant)>> = LazyLoc
 
 /// Try to receive a payload of arbitrary size.
 /// 
-/// Note that since this requires assembly of data on the receiver-side, the `should_collect` callback is supplied with the header of each incoming chunk so that it may indicate whether it wants to collect said chunk and start a local merge.
+/// On certain backings, this requires assembly of data on the receiver-side; thus a global `should_collect` callback might need to be set. The header of each incoming chunk is supplied to this callback, and with it the callback should indicate whether it wants the backing to collect said chunk and start a local merge.
 /// 
 /// This function never blocks, instead attempting to get a single accessible page and merging it if told to do so, then returning immediately.
 /// 
@@ -237,13 +249,13 @@ static CURRENT_BACKING: LazyLock<Mutex<(Backing, std::time::Instant)>> = LazyLoc
 /// This alloted time can end early if the backing, at any point during it, returns [`TryRecvStreamResult::OutOfAccessible`].
 /// 
 /// Each backing will only ever be queried once per call to [`try_recv_stream`], and if they all return [`TryRecvStreamResult::OutOfAccessible`], the same will be returned.
-pub fn try_recv_stream<I: FnMut(&[u8]) -> bool + Send + 'static + Clone>(should_collect: I) -> Result<TryRecvStreamResult, IpcError> {
-    let should_collect = Box::from(should_collect);
+pub fn try_recv_stream() -> Result<TryRecvStreamResult, IpcError> {
+    let should_collect = (*GLOBAL_SHOULD_COLLECT.lock()).clone();
 
-    let try_recv_stream = |backing: Backing, should_collect: Box<I>| {
+    let try_recv_stream = |backing: Backing, should_collect: &Option<ShouldCollectCallback>| {
         let (send, recv) = crossbeam::channel::bounded(1);
         match backing {
-            Backing::Iox2 => actor_call!(IOX2_RECV_SENDER_TX, Iox2BackingMessage::TryRecvStream { should_collect, respond_to: send }, recv),
+            Backing::Iox2 => actor_call!(IOX2_RECV_SENDER_TX, Iox2BackingMessage::TryRecvStream { should_collect: should_collect.ok_or(IpcError::MissingGlobalShouldCollect(String::from("iox2")))?, respond_to: send }, recv),
             Backing::_Count => panic!("this should never happen."),
         }
     };
@@ -267,7 +279,7 @@ pub fn try_recv_stream<I: FnMut(&[u8]) -> bool + Send + 'static + Clone>(should_
         // IMPORTANT: Make sure to *not* do `try_recv_stream` if this backing is currently blocked on `wait_stream`. This will block our try call which is not what we want at all.
         let blocked = WAIT_STREAM_LOCKS.read()[*current_backing as usize];
         if !blocked {
-            match try_recv_stream(*current_backing, should_collect.clone())? {
+            match try_recv_stream(*current_backing, &should_collect)? {
                 TryRecvStreamResult::NewCompleted(payload) => {
                     return Ok(TryRecvStreamResult::NewCompleted(payload));
                 },
@@ -288,9 +300,9 @@ pub fn try_recv_stream<I: FnMut(&[u8]) -> bool + Send + 'static + Clone>(should_
 
 /// Wait until new item is available on stream asynchronously.
 /// 
-/// Will return early if the shutdown signal is received, but only if that signal is sent from a different sending thread.
+/// Returns early if the shutdown signal is received, but only if that signal is sent from a different sending thread.
 /// 
-/// Note that only one thread can be calling [`wait_stream`] at a time. The behavior when it is called at the same time from more than one thread is undefined.
+/// Only one thread can be calling [`wait_stream`] at a time. The behavior when it is called at the same time from more than one thread is undefined.
 /// 
 /// # Implementation Notes
 /// 
@@ -375,6 +387,7 @@ pub fn close() {
         Err(e) => match e {
             IpcError::NotInitialized | IpcError::BackingCrashed(_) => (),
             IpcError::Iox2IpcError(_) => panic!("iox2 backend close is a no-op. this should never happen."),
+            IpcError::MissingGlobalShouldCollect(_) => panic!("`IpcError::MissingGlobalShouldCollect` should not be possible from trying to call `close`. this should never happen."),
         },
         Ok(_) => (),
     }
@@ -403,6 +416,7 @@ pub fn close() {
                 },
                 e => panic!("error '{:?}' should not be possible from trying to send a shutdown signal. this should never happen.", e),
             },
+            IpcError::MissingGlobalShouldCollect(_) => panic!("`IpcError::MissingGlobalShouldCollect` should not be possible from trying to call `close`. this should never happen."),
         }
     }
 
@@ -417,6 +431,7 @@ pub fn close() {
         Err(e) => match e {
             IpcError::NotInitialized | IpcError::BackingCrashed(_) => (),
             IpcError::Iox2IpcError(_) => panic!("iox2 backend close is a no-op. this should never happen."),
+            IpcError::MissingGlobalShouldCollect(_) => panic!("`IpcError::MissingGlobalShouldCollect` should not be possible from trying to call `close`. this should never happen."),
         },
         Ok(_) => (),
     }
@@ -440,12 +455,12 @@ pub fn close() {
 
 /// Receive a payload of arbitrary size asynchronously.
 /// 
-/// Since this requires assembly of data on the receiver-side, the `should_collect` callback is supplied with the header of each incoming chunk so that it may indicate whether it wants to collect said chunk and start a local merge.
+/// On certain backings, this requires assembly of data on the receiver-side; thus a global `should_collect` callback might need to be set. The header of each incoming chunk is supplied to this callback, and with it the callback should indicate whether it wants the backing to collect said chunk and start a local merge.
 /// 
 /// Only one thread can be calling [`recv_stream`] at a time (as [`recv_stream`] calls [`wait_stream`] under-the-hood). The behavior when it is called at the same time from more than one thread is undefined.
-pub async fn recv_stream<I: FnMut(&[u8]) -> bool + Send + 'static + Clone>(should_collect: I) -> Result<Vec<u8>, IpcError> {
+pub async fn recv_stream() -> Result<Vec<u8>, IpcError> {
     loop {
-        match try_recv_stream(should_collect.clone()) {
+        match try_recv_stream() {
             Ok(did_finish_new_merged_message_before_ran_out_of_accessible_pages) => match did_finish_new_merged_message_before_ran_out_of_accessible_pages {
                 super::common::TryRecvStreamResult::NewCompleted(merged_message) => return Ok(merged_message),
                 super::common::TryRecvStreamResult::PotentiallyAvailable => {
@@ -463,7 +478,7 @@ pub async fn recv_stream<I: FnMut(&[u8]) -> bool + Send + 'static + Clone>(shoul
 
 /// Send an arbitrarily-sized payload.
 /// 
-/// Note that since this requires assembly of data on the receiver-side, all payloads should have a small header section so that receivers can decide if they want to reconstruct the message or pass on it, saving memory and execution time.
+/// Since this might require reassembly of data on the receiver-side on certain backings, all payloads should have a small header section so that receivers can decide if they want to reconstruct the message or pass on it, saving memory and execution time.
 /// 
 /// The `header_size` specifies how many bytes from the head of the payload corresponds to the header; every fragment sent will include the header but have different sections of the body.
 pub fn send_stream(payload: &[u8], header_size: usize) -> Result<(), IpcError> {
@@ -491,9 +506,9 @@ pub fn blocking_wait_stream() -> Result<(), IpcError> {
 }
 
 /// Blocking version of [`recv_stream`].
-pub fn blocking_recv_stream<I: FnMut(&[u8]) -> bool + Send + 'static + Clone>(should_collect: I) -> Result<Vec<u8>, IpcError> {
+pub fn blocking_recv_stream() -> Result<Vec<u8>, IpcError> {
     TOKIO_RT.with(|cell| {
-        cell.block_on(recv_stream(should_collect))
+        cell.block_on(recv_stream())
     })
 }
 
