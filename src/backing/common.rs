@@ -181,6 +181,7 @@ pub enum InterruptSignals {
 }
 
 /// Return value on `try_recv_stream` success.
+#[derive(Debug)]
 pub enum TryRecvStreamResult {
     /// A new merge has been completed.
     NewCompleted(Vec<u8>),
