@@ -11,7 +11,7 @@ use std::sync::{LazyLock, Weak};
 use std::collections::HashMap;
 
 #[cfg(feature = "autodrop")]
-static ACTIVE_MESSAGE_CONSUMERS: LazyLock<RwLock<HashMap<u64, Weak<MessageConsumer>, crate::hasher::IdentityHash>>> = LazyLock::new(|| RwLock::new(HashMap::with_hasher(crate::hasher::IdentityHash::default())));
+static ACTIVE_MESSAGE_CONSUMERS: LazyLock<RwLock<HashMap<u64, Weak<()>, crate::hasher::IdentityHash>>> = LazyLock::new(|| RwLock::new(HashMap::with_hasher(crate::hasher::IdentityHash::default())));
 
 /// A message queue based upon a linked list so that consuming iterators can decide to process any message atomically and independent of other consumers, who might be looking at a different set of messages.
 pub struct LinkMessageQueue {
@@ -42,7 +42,7 @@ pub struct NextMessage {
     payload: Arc<RwLock<Option<Vec<u8>>>>,
     next: Option<Arc<Mutex<NextMessage>>>,
     #[cfg(feature = "autodrop")]
-    target_consumers: Option<HashMap<u64, Weak<MessageConsumer>, crate::hasher::IdentityHash>>,
+    target_consumers: Option<HashMap<u64, Weak<()>, crate::hasher::IdentityHash>>,
 }
 impl NextMessage {
     fn is_claimed(&self) -> bool {
@@ -151,19 +151,23 @@ impl LinkMessageQueue {
     /// 
     /// The returned `MessageConsumer` is decoupled from the message queue and have distinct lifetimes.
     #[cfg(feature = "autodrop")]
-    pub fn create_consumer(&self) -> Arc<MessageConsumer> {
+    pub fn create_consumer(&self) -> MessageConsumer {
         let id = rand::rng().random::<u64>();
 
-        let consumer = Arc::new(MessageConsumer {
+        let drop_tracker = Arc::new(());
+        let drop_tracker_upstream = drop_tracker.clone();
+
+        let consumer = MessageConsumer {
             current: self.root.clone(),
             new_message_notify: self.new_message_notify.clone(),
             id,
-        });
+            drop_tracker,
+        };
 
         {
             let mut active_consumers = ACTIVE_MESSAGE_CONSUMERS.write();
             active_consumers.retain(|_, consumer| consumer.strong_count() != 0);
-            active_consumers.insert(id, Arc::downgrade(&consumer));
+            active_consumers.insert(id, Arc::downgrade(&drop_tracker_upstream));
         }
 
         consumer
@@ -187,6 +191,8 @@ pub struct MessageConsumer {
     new_message_notify: Arc<Notify>,
     #[cfg(feature = "autodrop")]
     id: u64,
+    #[cfg(feature = "autodrop")]
+    drop_tracker: Arc<()>,
 }
 impl MessageConsumer {
     /// Asynchronously wait for the next message to arrive.
