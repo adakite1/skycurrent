@@ -7,7 +7,7 @@ use bitvec::prelude as bv;
 
 use super::common::{actor_call, actor_join, TryRecvStreamResult};
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 #[repr(u8)]
 enum Backing {
     Iox2 = 0,
@@ -18,6 +18,14 @@ impl Backing {
         match backing {
             0 => Backing::Iox2,
             _ => panic!("this should never happen.")
+        }
+    }
+}
+impl std::fmt::Display for Backing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Backing::Iox2 => write!(f, "iox2"),
+            Backing::_Count => write!(f, "<INVALID>"),
         }
     }
 }
@@ -88,6 +96,9 @@ pub enum InitError {
     /// Encountered an initialization error in the common code.
     #[error("encountered an initialization error in the common code")]
     CommonInitError(#[from] super::common::InitError),
+    /// Backing crashed during initialization routine.
+    #[error("backing '{0}' crashed during initialization routine")]
+    BackingCrashed(Backing),
     /// Failed to initialize the iceoryx2 backing.
     #[cfg(feature = "backing-iox2")]
     #[error("failed to initialize iceoryx2 backing")]
@@ -158,8 +169,8 @@ pub fn init(flags: InitFlags) -> Result<(), InitError> {
 
                 // Initialize.
                 let (send, recv) = crossbeam::channel::bounded(1);
-                if let Err(_) = sender_tx.send(Iox2BackingMessage::Init { path: global_project_dir.clone(), flags: iox2_flags, respond_to: send }) { panic!("'iox2' backing has crashed."); }
-                recv.recv().expect("'iox2' backing has crashed.")?;
+                if let Err(_) = sender_tx.send(Iox2BackingMessage::Init { path: global_project_dir.clone(), flags: iox2_flags, respond_to: send }) { return Err(InitError::BackingCrashed(Backing::Iox2)); }
+                if let Ok(result) = recv.recv() { result?; } else { return Err(InitError::BackingCrashed(Backing::Iox2)); }
                 drop(recv);
     
                 // Store the sender.
@@ -179,8 +190,8 @@ pub fn init(flags: InitFlags) -> Result<(), InitError> {
 
                 // Initialize.
                 let (send, recv) = crossbeam::channel::bounded(1);
-                if let Err(_) = sender_tx.send(Iox2BackingMessage::Init { path: global_project_dir, flags: iox2_flags, respond_to: send }) { panic!("'iox2' backing has crashed."); }
-                recv.recv().expect("'iox2' backing has crashed.")?;
+                if let Err(_) = sender_tx.send(Iox2BackingMessage::Init { path: global_project_dir, flags: iox2_flags, respond_to: send }) { return Err(InitError::BackingCrashed(Backing::Iox2)); }
+                if let Ok(result) = recv.recv() { result?; } else { return Err(InitError::BackingCrashed(Backing::Iox2)); }
                 drop(recv);
     
                 // Store the sender.
@@ -200,6 +211,9 @@ pub enum IpcError {
     /// IPC not initialized on this thread.
     #[error("SkyCurrent is not initialized on this thread - call `init` first")]
     NotInitialized,
+    /// Backing crashed during call.
+    #[error("{0}: backing crashed during call")]
+    BackingCrashed(&'static str),
     /// IPC error encountered in the iceoryx2 backing.
     #[cfg(feature = "backing-iox2")]
     #[error("ipc error encountered in the iceoryx2 backing")]

@@ -35,9 +35,10 @@ macro_rules! actor_call {
     ($sender_tx:ident, $message_expr:expr) => {{
         if let Some(sender_tx) = $sender_tx.read().as_ref() {
             if let Err(_) = sender_tx.send($message_expr) {
-                panic!("{}: backing has crashed.", stringify!($sender_tx));
+                Err(IpcError::BackingCrashed(stringify!($sender_tx)))
+            } else {
+                Ok(())
             }
-            Ok(())
         } else {
             Err(IpcError::NotInitialized)
         }
@@ -45,9 +46,13 @@ macro_rules! actor_call {
     ($sender_tx:ident, $message_expr:expr, $recv:ident) => {{
         if let Some(sender_tx) = $sender_tx.read().as_ref() {
             if let Err(_) = sender_tx.send($message_expr) {
-                panic!("{}: backing has crashed.", stringify!($sender_tx));
+                return Err(IpcError::BackingCrashed(stringify!($sender_tx)));
             }
-            Ok($recv.recv().expect(&format!("{}: backing has crashed.", stringify!($sender_tx)))?)
+            if let Ok(result) = $recv.recv() {
+                Ok(result?)
+            } else {
+                Err(IpcError::BackingCrashed(stringify!($sender_tx)))
+            }
         } else {
             Err(IpcError::NotInitialized)
         }
@@ -91,9 +96,10 @@ macro_rules! actor_call_tl {
         $sender_tx.with(|cell| {
             if let Some(sender_tx) = cell.get() {
                 if let Err(_) = sender_tx.send($message_expr) {
-                    panic!("{}: backing has crashed.", stringify!($sender_tx));
+                    Err(IpcError::BackingCrashed(stringify!($sender_tx)))
+                } else {
+                    Ok(())
                 }
-                Ok(())
             } else {
                 Err(IpcError::NotInitialized)
             }
@@ -103,9 +109,13 @@ macro_rules! actor_call_tl {
         $sender_tx.with(|cell| {
             if let Some(sender_tx) = cell.get() {
                 if let Err(_) = sender_tx.send($message_expr) {
-                    panic!("{}: backing has crashed.", stringify!($sender_tx));
+                    return Err(IpcError::BackingCrashed(stringify!($sender_tx)));
                 }
-                Ok($recv.recv().expect(&format!("{}: backing has crashed.", stringify!($sender_tx)))?)
+                if let Ok(result) = $recv.recv() {
+                    Ok(result?)
+                } else {
+                    Err(IpcError::BackingCrashed(stringify!($sender_tx)))
+                }
             } else {
                 Err(IpcError::NotInitialized)
             }
