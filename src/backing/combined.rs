@@ -1,6 +1,7 @@
-use std::{cell::LazyCell, path::{Path, PathBuf}, sync::{Arc, LazyLock}, thread::{self, JoinHandle}, time::Duration};
+use std::{path::{Path, PathBuf}, sync::{Arc, LazyLock}, thread::{self, JoinHandle}, time::Duration};
 
 use parking_lot::{Mutex, RwLock};
+use pollster::FutureExt;
 use thiserror::Error;
 use bitflags::bitflags;
 use bitvec::prelude as bv;
@@ -11,12 +12,14 @@ use super::common::{actor_call, actor_join, TryRecvStreamResult};
 #[repr(u8)]
 pub enum Backing {
     Iox2 = 0,
-    _Count = 1
+    WsGateway = 1,
+    _Count = 2,
 }
 impl Backing {
     pub fn from(backing: u8) -> Backing {
         match backing {
             0 => Backing::Iox2,
+            1 => Backing::WsGateway,
             _ => panic!("this should never happen.")
         }
     }
@@ -25,11 +28,13 @@ impl std::fmt::Display for Backing {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Backing::Iox2 => write!(f, "iox2"),
+            Backing::WsGateway => write!(f, "ws-gateway"),
             Backing::_Count => write!(f, "<INVALID>"),
         }
     }
 }
 
+#[cfg(feature = "backing-iox2")]
 enum Iox2BackingMessage {
     Init {
         path: PathBuf,
@@ -62,10 +67,15 @@ pub type ShouldCollectCallback = fn(&[u8]) -> bool;
 static GLOBAL_PROJECT_DIR: LazyLock<Mutex<Option<PathBuf>>> = LazyLock::new(|| Mutex::new(None));
 static GLOBAL_SHOULD_COLLECT: LazyLock<Mutex<Option<ShouldCollectCallback>>> = LazyLock::new(|| Mutex::new(None));
 
+#[cfg(feature = "backing-iox2")]
 static IOX2_RECV_THREAD_JOIN_HANDLE: LazyLock<Mutex<Option<JoinHandle<()>>>> = LazyLock::new(|| Mutex::new(None));
+#[cfg(feature = "backing-iox2")]
 static IOX2_RECV_SENDER_TX: LazyLock<RwLock<Option<crossbeam::channel::Sender<Iox2BackingMessage>>>> = LazyLock::new(|| RwLock::new(None));
+#[cfg(feature = "backing-iox2")]
 static IOX2_SEND_THREAD_JOIN_HANDLE: LazyLock<Mutex<Option<JoinHandle<()>>>> = LazyLock::new(|| Mutex::new(None));
+#[cfg(feature = "backing-iox2")]
 static IOX2_SEND_SENDER_TX: LazyLock<RwLock<Option<crossbeam::channel::Sender<Iox2BackingMessage>>>> = LazyLock::new(|| RwLock::new(None));
+
 static WAIT_STREAM_LOCKS: LazyLock<RwLock<bv::BitVec>> = std::sync::LazyLock::new(|| RwLock::new(bv::bitvec![0; Backing::_Count as usize]));
 static WAIT_STREAM_RECEIVER: LazyLock<Mutex<Option<tokio::sync::mpsc::Receiver<Result<Backing, IpcError>>>>> = LazyLock::new(|| Mutex::new(None));
 
@@ -115,13 +125,17 @@ pub enum InitError {
     #[cfg(feature = "backing-iox2")]
     #[error("failed to initialize iceoryx2 backing")]
     Iox2InitError(#[from] super::iox2::InitError),
+    /// Failed to initialize the websocket gateway backing.
+    #[cfg(feature = "backing-ws-gateway")]
+    #[error("failed to initialize websocket gateway backing")]
+    WsGatewayInitError(#[from] super::ws_gateway::InitError),
 }
 /// Initializes SkyCurrent with the given flags.
 /// 
 /// Certain backings require a project directory. Use [`set_global_project_dir`] to set that first.
 /// 
-/// If [`init`] has already been called once before for this thread, this is a no-op.
-pub fn init(flags: InitFlags) -> Result<(), InitError> {
+/// If [`init`] has already been called once before for this thread, unless [`close`] was called, this is a no-op.
+pub async fn init(flags: InitFlags) -> Result<(), InitError> {
     let project_dir = (&*GLOBAL_PROJECT_DIR.lock()).clone();
 
     // Create special communication channels for `wait_stream`.
@@ -219,6 +233,12 @@ pub fn init(flags: InitFlags) -> Result<(), InitError> {
         }
     }
 
+    // Initialize websocket gateway backing.
+    #[cfg(feature = "backing-ws-gateway")]
+    if flags.intersects(InitFlags::INIT_WS_GATEWAY) {
+        super::ws_gateway::init().await?;
+    }
+
     Ok(())
 }
 
@@ -238,6 +258,10 @@ pub enum IpcError {
     #[cfg(feature = "backing-iox2")]
     #[error("ipc error encountered in the iceoryx2 backing")]
     Iox2IpcError(#[from] super::iox2::IpcError),
+    /// IPC error encountered in the websocket gateway backing.
+    #[cfg(feature = "backing-ws-gateway")]
+    #[error("ipc error encountered in the websocket gateway backing")]
+    WsGatewayIpcError(#[from] super::ws_gateway::IpcError),
 }
 
 static CURRENT_BACKING: LazyLock<Mutex<(Backing, std::time::Instant)>> = LazyLock::new(|| Mutex::new((Backing::_Count, std::time::Instant::now())));
@@ -261,9 +285,23 @@ pub fn try_recv_stream() -> Result<TryRecvStreamResult, IpcError> {
     let should_collect = (*GLOBAL_SHOULD_COLLECT.lock()).clone();
 
     let try_recv_stream = |backing: Backing, should_collect: &Option<ShouldCollectCallback>| {
-        let (send, recv) = crossbeam::channel::bounded(1);
         match backing {
-            Backing::Iox2 => actor_call!(IOX2_RECV_SENDER_TX, Iox2BackingMessage::TryRecvStream { should_collect: should_collect.ok_or(IpcError::MissingGlobalShouldCollect(String::from("iox2")))?, respond_to: send }, recv),
+            #[cfg(feature = "backing-iox2")]
+            Backing::Iox2 => {
+                let (send, recv) = crossbeam::channel::bounded(1);
+                actor_call!(IOX2_RECV_SENDER_TX, Iox2BackingMessage::TryRecvStream { should_collect: should_collect.ok_or(IpcError::MissingGlobalShouldCollect(String::from("iox2")))?, respond_to: send }, recv)
+            },
+            #[cfg(not(feature = "backing-iox2"))]
+            Backing::Iox2 => panic!("not built with backing '{}'. this should never happen.", backing),
+            #[cfg(feature = "backing-ws-gateway")]
+            Backing::WsGateway => super::ws_gateway::try_recv_copy().map(|try_recv_copy_result| {
+                match try_recv_copy_result {
+                    super::common::TryRecvCopyResult::NewMessage(items) => TryRecvStreamResult::NewCompleted((items, 0)),
+                    super::common::TryRecvCopyResult::OutOfAccessible => TryRecvStreamResult::OutOfAccessible,
+                }
+            }).map_err(|e| IpcError::WsGatewayIpcError(e)),
+            #[cfg(not(feature = "backing-ws-gateway"))]
+            Backing::WsGateway => panic!("not built with backing '{}'. this should never happen.", backing),
             Backing::_Count => panic!("this should never happen."),
         }
     };
@@ -287,9 +325,77 @@ pub fn try_recv_stream() -> Result<TryRecvStreamResult, IpcError> {
         // IMPORTANT: Make sure to *not* do `try_recv_stream` if this backing is currently blocked on `wait_stream`. This will block our try call which is not what we want at all.
         let blocked = WAIT_STREAM_LOCKS.read()[*current_backing as usize];
         if !blocked {
+            #[cfg(not(feature = "backing-iox2"))]
+            if matches!(current_backing, Backing::Iox2) {
+                continue;
+            }
+            #[cfg(not(feature = "backing-ws-gateway"))]
+            if matches!(current_backing, Backing::WsGateway) {
+                continue;
+            }
             match try_recv_stream(*current_backing, &should_collect)? {
-                TryRecvStreamResult::NewCompleted(payload) => {
-                    return Ok(TryRecvStreamResult::NewCompleted(payload));
+                TryRecvStreamResult::NewCompleted((mut payload, header_size)) => {
+                    match current_backing {
+                        Backing::Iox2 => {
+                            #[cfg(feature = "backing-ws-gateway")]
+                            {
+                                // When we receive a message on this backing, we want to forward it to the websocket gateway backing.
+                                let mut payload_copy = payload.clone();
+                                payload_copy.extend_from_slice(&(header_size as u64).to_le_bytes());
+                                super::ws_gateway::send_copy(payload_copy);
+                            }
+
+                            return Ok(TryRecvStreamResult::NewCompleted((payload, header_size)));
+                        },
+                        Backing::WsGateway => {
+                            // For the websocket gateway backing, any messages received are not immediately given to the client, but instead sent to the mesh (iox2) backing.
+                            // Once the echo of that message comes back, we will hear the message proper.
+                            // This mirrors the behavior of sending directly with [`send_stream`].
+                            // This is where the naming of the websocket gateway client as the websocket leaf comes from.
+                            #[cfg(feature = "backing-iox2")]
+                            macro_rules! blocking_retry_after_small_timeout {
+                                ($error:ident) => {{
+                                    eprintln!("{:?}", $error);
+                                    eprintln!("Retrying in 100ms...");
+                                    thread::sleep(Duration::from_millis(100));
+                                }};
+                            }
+
+                            // Last 8 bytes of websocket payload should be header size (little-endian).
+                            let header_size = u64::from_le_bytes((&payload)[payload.len()-8..].try_into().unwrap()) as usize;
+                            
+                            #[cfg(not(feature = "backing-iox2"))]
+                            #[cfg(feature = "backing-ws-gateway")]
+                            {
+                                super::ws_gateway::send_copy(payload.clone());
+                                payload.truncate(payload.len()-8);
+                                return Ok(TryRecvStreamResult::NewCompleted((payload, header_size)));
+                            }
+                            
+                            // Cut off last 8 bytes to get the actual payload.
+                            payload.truncate(payload.len()-8);
+
+                            loop {
+                                #[cfg(feature = "backing-iox2")]
+                                match send_stream(&payload, header_size) {
+                                    Ok(_) => break,
+                                    Err(e) => match e {
+                                        #[cfg(feature = "backing-iox2")]
+                                        IpcError::Iox2IpcError(e) => match e {
+                                            crate::backing::iox2::IpcError::Iox2NotifierNotifyError(_) => blocking_retry_after_small_timeout!(e),
+                                            crate::backing::iox2::IpcError::Iox2PublisherLoanError(_) => blocking_retry_after_small_timeout!(e),
+                                            crate::backing::iox2::IpcError::Iox2PublisherSendError(_) => blocking_retry_after_small_timeout!(e),
+                                            _ => panic!("{:?}", e),
+                                        },
+                                        _ => panic!("{:?}", e),
+                                    },
+                                }
+                            }
+
+                            return Ok(TryRecvStreamResult::PotentiallyAvailable);
+                        },
+                        Backing::_Count => panic!("this should never happen."),
+                    }
                 },
                 TryRecvStreamResult::PotentiallyAvailable => {
                     return Ok(TryRecvStreamResult::PotentiallyAvailable);
@@ -312,6 +418,8 @@ pub fn try_recv_stream() -> Result<TryRecvStreamResult, IpcError> {
 /// 
 /// Only one thread can be calling [`wait_stream`] at a time. The behavior when it is called at the same time from more than one thread is undefined.
 /// 
+/// When using in a loop to receive messages, call to get a Future first before calling [`try_recv_stream`], and await the Future if [`try_recv_stream`] returns with [`TryRecvStreamResult::OutOfAccessible`].
+/// 
 /// # Implementation Notes
 /// 
 /// Internally, calling this function will always cause every receiver backing to get blocked on their own `wait_stream` functions.
@@ -324,19 +432,41 @@ pub async fn wait_stream() -> Result<(), IpcError> {
         let mut cell = WAIT_STREAM_LOCKS.write();
 
         // IOX2_RECV_SENDER_TX
+        #[cfg(feature = "backing-iox2")]
         if !cell[Backing::Iox2 as usize] {
             actor_call!(IOX2_RECV_SENDER_TX, Iox2BackingMessage::WaitStream)?;
             cell.set(Backing::Iox2 as usize, true);
         }
     }
     if let Some(wait_stream_rx) = WAIT_STREAM_RECEIVER.lock().as_mut() {
-        // Wait until at least one `wait_stream` response comes back.
-        if let Some(backing) = wait_stream_rx.recv().await {
-            handle_wait_stream_return(backing)?;
+        #[cfg(feature = "backing-iox2")]
+        #[cfg(not(feature = "backing-ws-gateway"))]
+        {
+            // Wait until at least one `wait_stream` response comes back.
+            if let Some(backing) = wait_stream_rx.recv().await {
+                handle_wait_stream_return(backing)?;
+            }
+            // Now, we drain the receiving end to get out any remaining easily accessible responses.
+            while let Ok(backing) = wait_stream_rx.try_recv() {
+                handle_wait_stream_return(backing)?;
+            }
         }
-        // Now, we drain the receiving end to get out any remaining easily accessible responses.
-        while let Ok(backing) = wait_stream_rx.try_recv() {
-            handle_wait_stream_return(backing)?;
+        #[cfg(feature = "backing-iox2")]
+        #[cfg(feature = "backing-ws-gateway")]
+        tokio::select! {
+            backing_some = wait_stream_rx.recv() => {
+                // Wait until at least one `wait_stream` response comes back.
+                if let Some(backing) = backing_some {
+                    handle_wait_stream_return(backing)?;
+                }
+                // Now, we drain the receiving end to get out any remaining easily accessible responses.
+                while let Ok(backing) = wait_stream_rx.try_recv() {
+                    handle_wait_stream_return(backing)?;
+                }
+            }
+            _ = super::ws_gateway::wait_stream() => {
+                // If the ws-gateway backing returned, there's no need to set the WAIT_STREAM_LOCKS flag since it was never blocked anyways.
+            }
         }
         Ok(())
     } else {
@@ -379,8 +509,13 @@ fn wait_stream_drain() -> Result<(), IpcError> {
 /// This simply causes certain blocking functions to return early. Most notably, [`wait_stream`] should return early when this signal is sent.
 pub fn shutdown_signal() -> Result<(), IpcError> {
     // IOX2_SEND_SENDER_TX
-    let (send, recv) = crossbeam::channel::bounded(1);
-    actor_call!(IOX2_SEND_SENDER_TX, Iox2BackingMessage::ShutdownSignal { respond_to: send }, recv)?;
+    #[cfg(feature = "backing-iox2")]
+    {
+        let (send, recv) = crossbeam::channel::bounded(1);
+        actor_call!(IOX2_SEND_SENDER_TX, Iox2BackingMessage::ShutdownSignal { respond_to: send }, recv)?;
+    }
+
+    // websocket gateway backing does not need a shutdown signal to break out of `wait_stream` since it isn't blocking.
 
     Ok(())
 }
@@ -390,16 +525,21 @@ pub fn shutdown_signal() -> Result<(), IpcError> {
 /// On some backings, this function is a no-op, but it should always be called before the thread using the library exits to give SkyCurrent a chance to clean up.
 pub fn close() {
     // IOX2_RECV_SENDER_TX (part 1)
-    let (send, _) = crossbeam::channel::bounded(1);
-    match actor_call!(IOX2_RECV_SENDER_TX, Iox2BackingMessage::Close { respond_to: send }) {
-        Err(e) => match e {
-            IpcError::NotInitialized | IpcError::BackingCrashedOrNotStarted(_) => (),
-            IpcError::Iox2IpcError(_) => panic!("iox2 backend close is a no-op. this should never happen."),
-            IpcError::MissingGlobalShouldCollect(_) => panic!("`IpcError::MissingGlobalShouldCollect` should not be possible from trying to call `close`. this should never happen."),
-        },
-        Ok(_) => (),
+    #[cfg(feature = "backing-iox2")]
+    {
+        let (send, _) = crossbeam::channel::bounded(1);
+        match actor_call!(IOX2_RECV_SENDER_TX, Iox2BackingMessage::Close { respond_to: send }) {
+            Err(e) => match e {
+                IpcError::NotInitialized | IpcError::BackingCrashedOrNotStarted(_) => (),
+                IpcError::Iox2IpcError(_) => panic!("iox2 backend close is a no-op. this should never happen."),
+                #[cfg(feature = "backing-ws-gateway")]
+                IpcError::WsGatewayIpcError(_) => panic!("ws-gateway backend close is a no-op. this should never happen."),
+                IpcError::MissingGlobalShouldCollect(_) => panic!("`IpcError::MissingGlobalShouldCollect` should not be possible from trying to call `close`. this should never happen."),
+            },
+            Ok(_) => (),
+        }
+        let _ = IOX2_RECV_SENDER_TX.write().take();
     }
-    let _ = IOX2_RECV_SENDER_TX.write().take();
 
     // All possibly blocked threads have now been sent a Close actor call. Now to get them to break out of their blocked states, we send the shutdown signal.
     while let Err(e) = shutdown_signal() {
@@ -412,6 +552,7 @@ pub fn close() {
                 eprintln!("WARNING: some backings were not running or crashed while delivering the shutdown signal; `close` will block until `wait_stream` calls currently executing in other threads naturally exits!");
                 break;
             },
+            #[cfg(feature = "backing-iox2")]
             IpcError::Iox2IpcError(e) => match e {
                 super::iox2::IpcError::NotInitialized => panic!("if send flag was set, the thread meant for iox2 sending would definitely have been initialized for sending. this should never happen."),
                 super::iox2::IpcError::Iox2NotifierNotifyError(notifier_notify_error) => {
@@ -424,26 +565,36 @@ pub fn close() {
                 },
                 e => panic!("error '{:?}' should not be possible from trying to send a shutdown signal. this should never happen.", e),
             },
+            #[cfg(feature = "backing-ws-gateway")]
+            IpcError::WsGatewayIpcError(e) => panic!("error '{:?}' should not be possible from trying to send a shutdown signal. the ws-gateway backing does not even need the shutdown signal. this should never happen.", e),
             IpcError::MissingGlobalShouldCollect(_) => panic!("`IpcError::MissingGlobalShouldCollect` should not be possible from trying to call `close`. this should never happen."),
         }
     }
 
     // Join all receiver threads.
     // IOX2_RECV_SENDER_TX (part 2)
-    actor_join!(IOX2_RECV_THREAD_JOIN_HANDLE);
+    #[cfg(feature = "backing-iox2")]
+    {
+        actor_join!(IOX2_RECV_THREAD_JOIN_HANDLE);
+    }
 
     // IOX2_SEND_SENDER_TX
-    let (send, _) = crossbeam::channel::bounded(1);
-    match actor_call!(IOX2_SEND_SENDER_TX, Iox2BackingMessage::Close { respond_to: send }) {
-        Err(e) => match e {
-            IpcError::NotInitialized | IpcError::BackingCrashedOrNotStarted(_) => (),
-            IpcError::Iox2IpcError(_) => panic!("iox2 backend close is a no-op. this should never happen."),
-            IpcError::MissingGlobalShouldCollect(_) => panic!("`IpcError::MissingGlobalShouldCollect` should not be possible from trying to call `close`. this should never happen."),
-        },
-        Ok(_) => (),
+    #[cfg(feature = "backing-iox2")]
+    {
+        let (send, _) = crossbeam::channel::bounded(1);
+        match actor_call!(IOX2_SEND_SENDER_TX, Iox2BackingMessage::Close { respond_to: send }) {
+            Err(e) => match e {
+                IpcError::NotInitialized | IpcError::BackingCrashedOrNotStarted(_) => (),
+                IpcError::Iox2IpcError(_) => panic!("iox2 backend close is a no-op. this should never happen."),
+                #[cfg(feature = "backing-ws-gateway")]
+                IpcError::WsGatewayIpcError(_) => panic!("ws-gateway backend close is a no-op. this should never happen."),
+                IpcError::MissingGlobalShouldCollect(_) => panic!("`IpcError::MissingGlobalShouldCollect` should not be possible from trying to call `close`. this should never happen."),
+            },
+            Ok(_) => (),
+        }
+        let _ = IOX2_SEND_SENDER_TX.write().take();
+        actor_join!(IOX2_SEND_THREAD_JOIN_HANDLE);
     }
-    let _ = IOX2_SEND_SENDER_TX.write().take();
-    actor_join!(IOX2_SEND_THREAD_JOIN_HANDLE);
 
     // Reset WAIT_STREAM_LOCKS to zeroes.
     WAIT_STREAM_LOCKS.write().fill(false);
@@ -466,15 +617,20 @@ pub fn close() {
 /// Only one thread can be calling [`recv_stream`] at a time (as [`recv_stream`] calls [`wait_stream`] under-the-hood). The behavior when it is called at the same time from more than one thread is undefined.
 pub async fn recv_stream() -> Result<Vec<u8>, IpcError> {
     loop {
+        // Get a future in case we run out of accessible messages in the next part.
+        let future = wait_stream();
         match try_recv_stream() {
             Ok(did_finish_new_merged_message_before_ran_out_of_accessible_pages) => match did_finish_new_merged_message_before_ran_out_of_accessible_pages {
-                super::common::TryRecvStreamResult::NewCompleted(merged_message) => return Ok(merged_message),
+                super::common::TryRecvStreamResult::NewCompleted(merged_message) => return Ok(merged_message.0),
                 super::common::TryRecvStreamResult::PotentiallyAvailable => {
-                    tokio::task::yield_now().await;  // Provide tokio with an yield point.
+                    #[cfg(feature = "tokio")]
+                    {
+                        tokio::task::yield_now().await;  // Provide tokio with an yield point.
+                    }
                     continue;
                 },
                 super::common::TryRecvStreamResult::OutOfAccessible => {
-                    wait_stream().await?;
+                    future.await?;
                 }
             },
             Err(e) => return Err(e),
@@ -488,15 +644,30 @@ pub async fn recv_stream() -> Result<Vec<u8>, IpcError> {
 /// 
 /// The `header_size` specifies how many bytes from the head of the payload corresponds to the header; every fragment sent will include the header but have different sections of the body.
 pub fn send_stream(payload: &[u8], header_size: usize) -> Result<(), IpcError> {
-    let payload: Arc<[u8]> = Arc::from(payload);
+    let payload_arc: Arc<[u8]> = Arc::from(payload);
 
     // IOX2_SEND_SENDER_TX
-    let (send, recv) = crossbeam::channel::bounded(1);
-    actor_call!(IOX2_SEND_SENDER_TX, Iox2BackingMessage::SendStream { payload: payload.clone(), header_size, respond_to: send }, recv)?;
+    #[cfg(feature = "backing-iox2")]
+    {
+        let (send, recv) = crossbeam::channel::bounded(1);
+        actor_call!(IOX2_SEND_SENDER_TX, Iox2BackingMessage::SendStream { payload: payload_arc.clone(), header_size, respond_to: send }, recv)?;
+    }
+
+    // Websocket gateway will get sent the data automatically once we hear back our own echo.
+    // Unless, that is, ws-gateway is the only backing enabled.
+    #[cfg(not(feature = "backing-iox2"))]
+    #[cfg(feature = "backing-ws-gateway")]
+    {
+        let mut payload_copy = Vec::from(payload);
+        payload_copy.extend_from_slice(&(header_size as u64).to_le_bytes());
+        super::ws_gateway::send_copy_to_self(payload_copy)?;
+    }
 
     Ok(())
 }
 
+#[cfg(feature = "tokio")]
+#[cfg(feature = "backing-iox2")]
 pub(crate) async fn _wait_for_possible_crashes() {
     let iox2_recv_thread;
     {
@@ -520,24 +691,13 @@ pub(crate) async fn _wait_for_possible_crashes() {
     }
 }
 
-thread_local! {
-    static TOKIO_RT: LazyCell<tokio::runtime::Runtime> = LazyCell::new(|| tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("this should never happen."));
-}
-
 /// Blocking version of [`wait_stream`].
 pub fn blocking_wait_stream() -> Result<(), IpcError> {
-    TOKIO_RT.with(|cell| {
-        cell.block_on(wait_stream())
-    })
+    wait_stream().block_on()
 }
 
 /// Blocking version of [`recv_stream`].
 pub fn blocking_recv_stream() -> Result<Vec<u8>, IpcError> {
-    TOKIO_RT.with(|cell| {
-        cell.block_on(recv_stream())
-    })
+    recv_stream().block_on()
 }
 

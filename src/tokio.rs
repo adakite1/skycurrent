@@ -33,7 +33,7 @@ macro_rules! blocking_retry_after_small_timeout {
 
 pub async fn init() {
     // Initialize.
-    while let Err(e) = init_backing(InitFlags::INIT_IOX2_RECV | InitFlags::INIT_IOX2_SEND | InitFlags::INIT_WS_GATEWAY) {
+    while let Err(e) = init_backing(InitFlags::INIT_IOX2_RECV | InitFlags::INIT_IOX2_SEND | InitFlags::INIT_WS_GATEWAY).await {
         match e {
             crate::backing::combined::InitError::MissingGlobalProjectDirectory(e) => panic!("{:?}", e),
             crate::backing::combined::InitError::CommonInitError(e) => match e {
@@ -43,6 +43,7 @@ pub async fn init() {
                 crate::backing::common::InitError::TcpListenerBindError(_) => retry_after_timeout!(e),
             },
             crate::backing::combined::InitError::BackingCrashed(_) => retry_after_timeout!(e),
+            #[cfg(feature = "backing-iox2")]
             crate::backing::combined::InitError::Iox2InitError(e) => match e {
                 crate::backing::iox2::InitError::CommonInitError(e) => match e {
                     crate::backing::common::InitError::NotAFolder(_) => panic!("{:?}", e),
@@ -62,6 +63,15 @@ pub async fn init() {
                 crate::backing::iox2::InitError::Iox2InvalidConfigFilePathError(_, _) => panic!("{:?}", e),
                 crate::backing::iox2::InitError::Iox2ConfigCreationError(_) => panic!("{:?}", e),
             },
+            #[cfg(feature = "backing-ws-gateway")]
+            crate::backing::combined::InitError::WsGatewayInitError(e) => match e {
+                crate::backing::ws_gateway::InitError::CommonInitError(e) => match e {
+                    crate::backing::common::InitError::NotAFolder(_) => panic!("{:?}", e),
+                    crate::backing::common::InitError::FailedToCanonicalizeProjectPath(_, _) => panic!("{:?}", e),
+                    crate::backing::common::InitError::CreateDirError(_, _) => panic!("{:?}", e),
+                    crate::backing::common::InitError::TcpListenerBindError(_) => retry_after_timeout!(e),
+                },
+            },
         }
     };
 
@@ -72,6 +82,7 @@ pub async fn init() {
                 Ok(payload) => GLOBAL_LINK_MESSAGE_QUEUE.write().push(payload),
                 Err(e) => {
                     match e {
+                        #[cfg(feature = "backing-iox2")]
                         IpcError::Iox2IpcError(e) => match e {
                             crate::backing::iox2::IpcError::Iox2ListenerWaitError(_) => retry_after_small_timeout!(e),
                             crate::backing::iox2::IpcError::Iox2SubscriberReceiveError(_) => retry_after_small_timeout!(e),
@@ -106,6 +117,7 @@ pub fn send_stream(payload: &[u8], header_size: usize) {
         match send_stream_backing(payload, header_size) {
             Ok(_) => break,
             Err(e) => match e {
+                #[cfg(feature = "backing-iox2")]
                 IpcError::Iox2IpcError(e) => match e {
                     crate::backing::iox2::IpcError::Iox2NotifierNotifyError(_) => blocking_retry_after_small_timeout!(e),
                     crate::backing::iox2::IpcError::Iox2PublisherLoanError(_) => blocking_retry_after_small_timeout!(e),
