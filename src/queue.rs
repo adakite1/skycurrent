@@ -3,6 +3,16 @@ use std::sync::Arc;
 use parking_lot::{Mutex, RwLock};
 use tokio::sync::Notify;
 
+#[cfg(feature = "autodrop")]
+use rand::Rng;
+#[cfg(feature = "autodrop")]
+use std::sync::{LazyLock, Weak};
+#[cfg(feature = "autodrop")]
+use std::collections::HashMap;
+
+#[cfg(feature = "autodrop")]
+static ACTIVE_MESSAGE_CONSUMERS: LazyLock<RwLock<HashMap<u64, Weak<MessageConsumer>>>> = LazyLock::new(|| RwLock::new(HashMap::new()));
+
 /// A message queue based upon a linked list so that consuming iterators can decide to process any message atomically and independent of other consumers, who might be looking at a different set of messages.
 pub struct LinkMessageQueue {
     root: Arc<Mutex<NextMessage>>,
@@ -31,6 +41,8 @@ impl<'a> std::ops::Deref for MessageRef<'a> {
 pub struct NextMessage {
     payload: Arc<RwLock<Option<Vec<u8>>>>,
     next: Option<Arc<Mutex<NextMessage>>>,
+    #[cfg(feature = "autodrop")]
+    target_consumers: Option<HashMap<u64, Weak<MessageConsumer>>>,
 }
 impl NextMessage {
     fn is_claimed(&self) -> bool {
@@ -59,6 +71,8 @@ impl LinkMessageQueue {
         let tail = NextMessage {
             payload: Arc::new(RwLock::new(None)),  // Tail has no payload.
             next: None,
+            #[cfg(feature = "autodrop")]
+            target_consumers: None,
         };
         let tail_arc = Arc::new(Mutex::new(tail));
 
@@ -66,6 +80,8 @@ impl LinkMessageQueue {
         let root = NextMessage {
             payload: Arc::new(RwLock::new(None)),  // Root has no payload.
             next: Some(tail_arc.clone()),
+            #[cfg(feature = "autodrop")]
+            target_consumers: None,
         };
         let root_arc = Arc::new(Mutex::new(root));
 
@@ -84,6 +100,8 @@ impl LinkMessageQueue {
         let new_node = Arc::new(Mutex::new(NextMessage {
             payload: Arc::new(RwLock::new(Some(payload))),
             next: Some(self.tail.clone()),
+            #[cfg(feature = "autodrop")]
+            target_consumers: Some(ACTIVE_MESSAGE_CONSUMERS.read().clone()),
         }));
 
         {
@@ -132,6 +150,28 @@ impl LinkMessageQueue {
     /// Create a new `MessageConsumer`.
     /// 
     /// The returned `MessageConsumer` is decoupled from the message queue and have distinct lifetimes.
+    #[cfg(feature = "autodrop")]
+    pub fn create_consumer(&self) -> Arc<MessageConsumer> {
+        let id = rand::rng().random::<u64>();
+
+        let consumer = Arc::new(MessageConsumer {
+            current: self.root.clone(),
+            new_message_notify: self.new_message_notify.clone(),
+            id,
+        });
+
+        {
+            let mut active_consumers = ACTIVE_MESSAGE_CONSUMERS.write();
+            active_consumers.retain(|_, consumer| consumer.strong_count() != 0);
+            active_consumers.insert(id, Arc::downgrade(&consumer));
+        }
+
+        consumer
+    }
+    /// Create a new `MessageConsumer`.
+    /// 
+    /// The returned `MessageConsumer` is decoupled from the message queue and have distinct lifetimes.
+    #[cfg(not(feature = "autodrop"))]
     pub fn create_consumer(&self) -> MessageConsumer {
         MessageConsumer {
             current: self.root.clone(),
@@ -145,6 +185,8 @@ impl LinkMessageQueue {
 pub struct MessageConsumer {
     current: Arc<Mutex<NextMessage>>,
     new_message_notify: Arc<Notify>,
+    #[cfg(feature = "autodrop")]
+    id: u64,
 }
 impl MessageConsumer {
     /// Asynchronously wait for the next message to arrive.
@@ -232,6 +274,14 @@ impl MessageConsumer {
             // Then check the claim status.
             let current_is_claimed = current_payload_rw_lock.is_none();
 
+            #[cfg(feature = "autodrop")]
+            {
+                // Remove self from target consumers, then check if message should be autodropped once that is done.
+                if !current_is_claimed {
+                    check_should_now_autodrop(self.id, &mut current);
+                }
+            }
+
             // Get a copy of the next node.
             let mut next = current.next.clone();
 
@@ -318,5 +368,30 @@ thread_local! {
         .enable_all()
         .build()
         .expect("this should never happen."));
+}
+
+#[cfg(feature = "autodrop")]
+impl Drop for MessageConsumer {
+    fn drop(&mut self) {
+        // Remove self from active consumers.
+        let _ = ACTIVE_MESSAGE_CONSUMERS.write().remove(&self.id);
+
+        // Remove self from target consumers, then check if message should be autodropped once that is done.
+        let mut current = self.current.lock();
+        check_should_now_autodrop(self.id, &mut current);
+    }
+}
+
+#[cfg(feature = "autodrop")]
+fn check_should_now_autodrop(consumer_id: u64, current: &mut parking_lot::lock_api::MutexGuard<'_, parking_lot::RawMutex, NextMessage>) {
+    if let Some(target_consumers) = current.target_consumers.as_mut() {
+        target_consumers.remove(&consumer_id);
+
+        // Check if the remaining target consumers are all dead.
+        if target_consumers.values().all(|consumer_ref| consumer_ref.strong_count() == 0) {
+            // If so, claim the message.
+            let _ = current.claim();
+        }
+    }
 }
 

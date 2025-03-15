@@ -29,12 +29,16 @@ tracing-subscriber = "0.3.0"
 [features]
 default = [
     "tokio",
+    "autodrop",
     "backing-iox2",
     "backing-ws-gateway"
 ]
 tokio = [
     "dep:tokio",
     "tokio/full"
+]
+autodrop = [
+    "dep:rand",
 ]
 backing-iox2 = [
     "dep:dunce",
