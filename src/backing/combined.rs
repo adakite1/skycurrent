@@ -52,6 +52,9 @@ enum Iox2BackingMessage {
     Close {
         respond_to: crossbeam::channel::Sender<()>,
     },
+    _WaitForExit {
+        respond_to: tokio::sync::oneshot::Sender<()>,
+    },
 }
 
 pub type ShouldCollectCallback = fn(&[u8]) -> bool;
@@ -133,31 +136,36 @@ pub fn init(flags: InitFlags) -> Result<(), InitError> {
             move || {
                 // Listen for calls.
                 // Note that we are using blocking operations because this backend requires it.
+                let mut holding_until_exit = Vec::with_capacity(1);
                 while let Ok(call) = sender_rx.recv() {
                     match call {
                         Iox2BackingMessage::Init { path, flags, respond_to } => {
-                            respond_to.send(super::iox2::init(&path, flags));
+                            let _ = respond_to.send(super::iox2::init(&path, flags));
                         },
                         Iox2BackingMessage::TryRecvStream { should_collect, respond_to } => {
-                            respond_to.send(super::iox2::try_recv_stream(should_collect));
+                            let _ = respond_to.send(super::iox2::try_recv_stream(should_collect));
                         },
                         Iox2BackingMessage::WaitStream => {
                             if let Some(respond_to_wait_stream) = respond_to_wait_stream.as_ref() {
-                                respond_to_wait_stream.blocking_send(super::iox2::wait_stream().map(|_| Backing::Iox2).map_err(|e| IpcError::Iox2IpcError(e)));
+                                let _ = respond_to_wait_stream.blocking_send(super::iox2::wait_stream().map(|_| Backing::Iox2).map_err(|e| IpcError::Iox2IpcError(e)));
                             } else {
                                 panic!("this should never happen.");
                             }
                         },
                         Iox2BackingMessage::ShutdownSignal { respond_to } => {
-                            respond_to.send(super::iox2::shutdown_signal());
+                            let _ = respond_to.send(super::iox2::shutdown_signal());
                         },
                         Iox2BackingMessage::SendStream { payload, header_size, respond_to } => {
-                            respond_to.send(super::iox2::send_stream(&payload, header_size));
+                            let _ = respond_to.send(super::iox2::send_stream(&payload, header_size));
                         },
                         Iox2BackingMessage::Close { respond_to } => {
-                            respond_to.send(super::iox2::close());
+                            let _ = respond_to.send(super::iox2::close());
                             break;
                         },
+                        Iox2BackingMessage::_WaitForExit { respond_to } => {
+                            // When the thread exits, all oneshot channels still being held will close, thereby providing a signal for those waiting for this thread to exit.
+                            holding_until_exit.push(respond_to);
+                        }
                     }
                 }
             }
@@ -382,7 +390,7 @@ pub fn shutdown_signal() -> Result<(), IpcError> {
 /// On some backings, this function is a no-op, but it should always be called before the thread using the library exits to give SkyCurrent a chance to clean up.
 pub fn close() {
     // IOX2_RECV_SENDER_TX (part 1)
-    let (send, iox2_recv_close_recv) = crossbeam::channel::bounded(1);
+    let (send, _) = crossbeam::channel::bounded(1);
     match actor_call!(IOX2_RECV_SENDER_TX, Iox2BackingMessage::Close { respond_to: send }) {
         Err(e) => match e {
             IpcError::NotInitialized | IpcError::BackingCrashedOrNotStarted(_) => (),
@@ -422,11 +430,10 @@ pub fn close() {
 
     // Join all receiver threads.
     // IOX2_RECV_SENDER_TX (part 2)
-    let _ = iox2_recv_close_recv.recv();
     actor_join!(IOX2_RECV_THREAD_JOIN_HANDLE);
 
     // IOX2_SEND_SENDER_TX
-    let (send, recv) = crossbeam::channel::bounded(1);
+    let (send, _) = crossbeam::channel::bounded(1);
     match actor_call!(IOX2_SEND_SENDER_TX, Iox2BackingMessage::Close { respond_to: send }) {
         Err(e) => match e {
             IpcError::NotInitialized | IpcError::BackingCrashedOrNotStarted(_) => (),
@@ -435,7 +442,6 @@ pub fn close() {
         },
         Ok(_) => (),
     }
-    let _ = recv.recv();
     let _ = IOX2_SEND_SENDER_TX.write().take();
     actor_join!(IOX2_SEND_THREAD_JOIN_HANDLE);
 
@@ -489,6 +495,29 @@ pub fn send_stream(payload: &[u8], header_size: usize) -> Result<(), IpcError> {
     actor_call!(IOX2_SEND_SENDER_TX, Iox2BackingMessage::SendStream { payload: payload.clone(), header_size, respond_to: send }, recv)?;
 
     Ok(())
+}
+
+pub(crate) async fn _wait_for_possible_crashes() {
+    let iox2_recv_thread;
+    {
+        let send;
+        (send, iox2_recv_thread) = tokio::sync::oneshot::channel();
+        if let Err(_) = actor_call!(IOX2_RECV_SENDER_TX, Iox2BackingMessage::_WaitForExit { respond_to: send }) {
+            return;
+        }
+    }
+    let iox2_send_thread;
+    {
+        let send;
+        (send, iox2_send_thread) = tokio::sync::oneshot::channel();
+        if let Err(_) = actor_call!(IOX2_SEND_SENDER_TX, Iox2BackingMessage::_WaitForExit { respond_to: send }) {
+            return;
+        }
+    }
+    tokio::select! {
+        _ = iox2_recv_thread => {}
+        _ = iox2_send_thread => {}
+    }
 }
 
 thread_local! {
