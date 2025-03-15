@@ -361,7 +361,7 @@ pub fn try_recv_stream<I: FnMut(&[u8]) -> bool>(mut should_collect: I) -> Result
                 let payload_len = payload_body_len_remainder;
                 let header_size = identification as usize;
                 if should_collect(&blob.0[24..header_size+24]) {
-                    Some(blob.0[24..(payload_len+24)].to_vec())
+                    Some((blob.0[24..(payload_len+24)].to_vec(), header_size))
                 } else {
                     None
                 }
@@ -423,7 +423,7 @@ pub fn try_recv_stream<I: FnMut(&[u8]) -> bool>(mut should_collect: I) -> Result
                             let mut allocations = cell.borrow_mut();
     
                             if let Some((_, _, allocation)) = allocations.remove(&identification) {
-                                return Some(allocation);
+                                return Some((allocation, header_size));
                             }
                         }
     
@@ -482,7 +482,7 @@ pub fn recv_stream<I: FnMut(&[u8]) -> bool>(mut should_collect: I) -> Result<Vec
     loop {
         match try_recv_stream(&mut should_collect) {
             Ok(did_finish_new_merged_message_before_ran_out_of_accessible_pages) => match did_finish_new_merged_message_before_ran_out_of_accessible_pages {
-                super::common::TryRecvStreamResult::NewCompleted(merged_message) => return Ok(merged_message),
+                super::common::TryRecvStreamResult::NewCompleted((merged_message, _)) => return Ok(merged_message),
                 super::common::TryRecvStreamResult::PotentiallyAvailable => {
                     continue;
                 },

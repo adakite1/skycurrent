@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use parking_lot::{Mutex, RwLock};
+use pollster::FutureExt;
 use tokio::sync::Notify;
 
 #[cfg(feature = "autodrop")]
@@ -362,17 +363,8 @@ impl MessageConsumer {
     }
     /// Block until the next unclaimed message arrives.
     pub fn blocking_next(&mut self) -> NextMessage {
-        TOKIO_RT.with(|cell| {
-            cell.block_on(self.next())
-        })
+        self.next().block_on()
     }
-}
-
-thread_local! {
-    static TOKIO_RT: std::cell::LazyCell<tokio::runtime::Runtime>  = std::cell::LazyCell::new(|| tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("this should never happen."));
 }
 
 #[cfg(feature = "autodrop")]

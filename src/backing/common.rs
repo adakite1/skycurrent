@@ -141,13 +141,21 @@ pub(crate) struct ProjectDirectoryPaths {
     pub res: PathBuf,
     pub tmp: PathBuf,
 }
-pub(crate) fn build_project_dir_structure(path: &Path) -> Result<ProjectDirectoryPaths, InitError> {
+pub(crate) fn build_project_dir_structure(path_ref: &Path) -> Result<ProjectDirectoryPaths, InitError> {
     // We are expecting a project folder. If the project folder does not exist or is not a directory, we cannot continue.
-    if !path.is_dir() {
-        return Err(InitError::NotAFolder(path.to_path_buf()));
+    if !path_ref.is_dir() {
+        return Err(InitError::NotAFolder(path_ref.to_path_buf()));
     }
     // Canonicalize the project folder path.
-    let path = dunce::canonicalize(path).map_err(|e| InitError::FailedToCanonicalizeProjectPath(path.to_path_buf(), e.kind()))?;
+    let path: PathBuf;
+    #[cfg(not(feature = "backing-iox2"))]
+    {
+        path = std::fs::canonicalize(path_ref).map_err(|e| InitError::FailedToCanonicalizeProjectPath(path_ref.to_path_buf(), e.kind()))?;
+    }
+    #[cfg(feature = "backing-iox2")]
+    {
+        path = dunce::canonicalize(path_ref).map_err(|e| InitError::FailedToCanonicalizeProjectPath(path_ref.to_path_buf(), e.kind()))?;
+    }
 
     // Set up common temporary directories.
     //  The res/ directory is for things that should not be checked into git but still makes sense to be kept around for a long time.
@@ -184,7 +192,7 @@ pub enum InterruptSignals {
 #[derive(Debug)]
 pub enum TryRecvStreamResult {
     /// A new merge has been completed.
-    NewCompleted(Vec<u8>),
+    NewCompleted((Vec<u8>, usize)),
     /// More pages might reside in the buffer, waiting to be merged. Will be returned whenever a page was obtained in that run of `try_recv_stream`.
     PotentiallyAvailable,
     /// Out of any accessible pages to merge for now. Will be returned whenever a page was unable to be obtained in that run of `try_recv_stream`.
