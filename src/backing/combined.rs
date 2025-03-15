@@ -9,7 +9,7 @@ use super::common::{actor_call, actor_join, TryRecvStreamResult};
 
 #[derive(Clone, Copy, Debug)]
 #[repr(u8)]
-enum Backing {
+pub enum Backing {
     Iox2 = 0,
     _Count = 1
 }
@@ -223,9 +223,9 @@ pub enum IpcError {
     /// Some of the enabled backings require a global `should_collect` callback to be set. Set one with [`set_global_should_collect`] first before calling [`try_recv_stream`] or [`recv_stream`].
     #[error("backing {0:?} requires a global `should_collect` callback! set one with `set_global_should_collect` first before calling `try_recv_stream` or `recv_stream`")]
     MissingGlobalShouldCollect(String),
-    /// Backing crashed during call.
-    #[error("{0}: backing crashed during call")]
-    BackingCrashed(&'static str),
+    /// Backing crashed or is not started.
+    #[error("{0}: backing crashed or is not started")]
+    BackingCrashedOrNotStarted(&'static str),
     /// IPC error encountered in the iceoryx2 backing.
     #[cfg(feature = "backing-iox2")]
     #[error("ipc error encountered in the iceoryx2 backing")]
@@ -385,7 +385,7 @@ pub fn close() {
     let (send, iox2_recv_close_recv) = crossbeam::channel::bounded(1);
     match actor_call!(IOX2_RECV_SENDER_TX, Iox2BackingMessage::Close { respond_to: send }) {
         Err(e) => match e {
-            IpcError::NotInitialized | IpcError::BackingCrashed(_) => (),
+            IpcError::NotInitialized | IpcError::BackingCrashedOrNotStarted(_) => (),
             IpcError::Iox2IpcError(_) => panic!("iox2 backend close is a no-op. this should never happen."),
             IpcError::MissingGlobalShouldCollect(_) => panic!("`IpcError::MissingGlobalShouldCollect` should not be possible from trying to call `close`. this should never happen."),
         },
@@ -400,8 +400,8 @@ pub fn close() {
                 eprintln!("WARNING: combined runtime was not initialized with the ability to send shutdown signals; `close` will block until `wait_stream` calls currently executing in other threads naturally exits!");
                 break;
             },
-            IpcError::BackingCrashed(_) => {
-                eprintln!("WARNING: some backings crashed while delivering the shutdown signal; `close` will block until `wait_stream` calls currently executing in other threads naturally exits!");
+            IpcError::BackingCrashedOrNotStarted(_) => {
+                eprintln!("WARNING: some backings were not running or crashed while delivering the shutdown signal; `close` will block until `wait_stream` calls currently executing in other threads naturally exits!");
                 break;
             },
             IpcError::Iox2IpcError(e) => match e {
@@ -429,7 +429,7 @@ pub fn close() {
     let (send, recv) = crossbeam::channel::bounded(1);
     match actor_call!(IOX2_SEND_SENDER_TX, Iox2BackingMessage::Close { respond_to: send }) {
         Err(e) => match e {
-            IpcError::NotInitialized | IpcError::BackingCrashed(_) => (),
+            IpcError::NotInitialized | IpcError::BackingCrashedOrNotStarted(_) => (),
             IpcError::Iox2IpcError(_) => panic!("iox2 backend close is a no-op. this should never happen."),
             IpcError::MissingGlobalShouldCollect(_) => panic!("`IpcError::MissingGlobalShouldCollect` should not be possible from trying to call `close`. this should never happen."),
         },
