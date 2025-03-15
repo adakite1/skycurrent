@@ -11,9 +11,6 @@ macro_rules! actor_join {
             if let Err(e) = join_handle.join() {
                 eprintln!("{}: backing exited with panic: {:?}", stringify!($join_handle), e);
             }
-            Ok(())
-        } else {
-            Err(IpcError::NotInitialized)
         }
     }};
 }
@@ -70,9 +67,6 @@ macro_rules! actor_join_tl {
                 if let Err(e) = join_handle.join() {
                     eprintln!("{}: backing exited with panic: {:?}", stringify!($join_handle), e);
                 }
-                Ok(())
-            } else {
-                Err(IpcError::NotInitialized)
             }
         })
     };

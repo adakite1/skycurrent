@@ -471,7 +471,7 @@ pub fn shutdown_signal() -> Result<(), IpcError> {
 /// Close SkyCurrent.
 /// 
 /// On some backings, this function is a no-op, but it should always be called before the thread using the library exits to give SkyCurrent a chance to clean up.
-pub fn close() -> Result<(), IpcError> { Ok(()) }
+pub fn close() {  }
 
 /// Receive a payload of arbitrary size by fragmenting.
 /// 

@@ -50,7 +50,7 @@ enum Iox2BackingMessage {
         respond_to: crossbeam::channel::Sender<Result<(), super::iox2::IpcError>>,
     },
     Close {
-        respond_to: crossbeam::channel::Sender<Result<(), super::iox2::IpcError>>,
+        respond_to: crossbeam::channel::Sender<()>,
     },
 }
 
@@ -368,7 +368,7 @@ pub fn shutdown_signal() -> Result<(), IpcError> {
 /// Close SkyCurrent.
 /// 
 /// On some backings, this function is a no-op, but it should always be called before the thread using the library exits to give SkyCurrent a chance to clean up.
-pub fn close() -> Result<(), IpcError> {
+pub fn close() {
     // IOX2_RECV_SENDER_TX (part 1)
     let (send, iox2_recv_close_recv) = crossbeam::channel::bounded(1);
     match actor_call!(IOX2_RECV_SENDER_TX, Iox2BackingMessage::Close { respond_to: send }) {
@@ -401,7 +401,7 @@ pub fn close() -> Result<(), IpcError> {
 
                     continue;
                 },
-                e => panic!("error '{:?}' should not be possible from trying to send a shutdown signal. this should never happen.", e)
+                e => panic!("error '{:?}' should not be possible from trying to send a shutdown signal. this should never happen.", e),
             },
         }
     }
@@ -409,13 +409,20 @@ pub fn close() -> Result<(), IpcError> {
     // Join all receiver threads.
     // IOX2_RECV_SENDER_TX (part 2)
     let _ = iox2_recv_close_recv.recv();
-    actor_join!(IOX2_RECV_THREAD_JOIN_HANDLE)?;
+    actor_join!(IOX2_RECV_THREAD_JOIN_HANDLE);
 
     // IOX2_SEND_SENDER_TX
     let (send, recv) = crossbeam::channel::bounded(1);
-    actor_call!(IOX2_SEND_SENDER_TX, Iox2BackingMessage::Close { respond_to: send }, recv)?;
+    match actor_call!(IOX2_SEND_SENDER_TX, Iox2BackingMessage::Close { respond_to: send }) {
+        Err(e) => match e {
+            IpcError::NotInitialized | IpcError::BackingCrashed(_) => (),
+            IpcError::Iox2IpcError(_) => panic!("iox2 backend close is a no-op. this should never happen."),
+        },
+        Ok(_) => (),
+    }
+    let _ = recv.recv();
     let _ = IOX2_SEND_SENDER_TX.write().take();
-    actor_join!(IOX2_SEND_THREAD_JOIN_HANDLE)?;
+    actor_join!(IOX2_SEND_THREAD_JOIN_HANDLE);
 
     // Reset WAIT_STREAM_LOCKS to zeroes.
     WAIT_STREAM_LOCKS.write().fill(false);
@@ -423,7 +430,12 @@ pub fn close() -> Result<(), IpcError> {
     // Reset WAIT_STREAM_RECEIVER.
     *WAIT_STREAM_RECEIVER.lock() = None;
 
-    Ok(())
+    // Reset CURRENT_BACKING.
+    {
+        let (current_backing, entered) = &mut *CURRENT_BACKING.lock();
+        *current_backing = Backing::_Count;
+        *entered = std::time::Instant::now();
+    }
 }
 
 /// Receive a payload of arbitrary size asynchronously.

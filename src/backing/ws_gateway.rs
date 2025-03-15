@@ -52,7 +52,7 @@ pub async fn init() -> Result<(), InitError> {
                                 .serve_connection(io, service_fn(server_upgrade))
                                 .with_upgrades();
                             if let Err(e) = conn_fut.await {
-                                println!("an error occurred: {:?}", e);
+                                eprintln!("An error occurred: {:?}", e);
                             }
                         });
                     }
@@ -163,7 +163,7 @@ pub async fn recv_copy() -> Result<Vec<u8>, IpcError> {
 /// Close SkyCurrent.
 /// 
 /// On some backings, this function is a no-op, but it should always be called before the thread using the library exits to give SkyCurrent a chance to clean up.
-pub fn close() -> Result<(), IpcError> { Ok(()) }
+pub fn close() {  }
 
 /// Send a payload of arbitrary size.
 pub fn send_copy(payload: Vec<u8>) {
