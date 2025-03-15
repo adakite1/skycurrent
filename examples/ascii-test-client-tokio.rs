@@ -1,13 +1,13 @@
-use std::io::{stdin, stdout, BufRead, Write};
+use std::io::Write;
 
-use tokio::{self, io::Result, signal};
+use tokio::{self, io::{self, BufReader, AsyncBufReadExt, Result}};
 use tracing::error;
 
 fn should_collect(header: &[u8]) -> bool {
     header[0] == 'a' as u8
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     // Initialize tracing
     tracing_subscriber::fmt()
@@ -33,33 +33,31 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Spawn task to watch for Ctrl+C
-    let shutdown = tokio::spawn(async {
-        if let Err(e) = signal::ctrl_c().await {
-            error!("Failed to listen for ctrl+c: {}", e);
-            return;
-        }
-
-        println!("\nReceived Ctrl+C, shutting down...");
-        skycurrent::backing::combined::close();
-    });
-
-    // Handle sending in the main task
-    let stdin = stdin();
-    let mut stdout = stdout();
-
+    print!("{esc}[2J{esc}[1;1H", esc = 27 as char);
+    // Handle sending in an async manner
     println!("\x1b[32m[Sender] Ready. Type your message and press Enter:\x1b[0m");
-    for line in stdin.lock().lines() {
-        match line {
-            Ok(input) => {
+    
+    let mut stdin = BufReader::new(io::stdin());
+    let mut line = String::new();
+    
+    loop {
+        // Reset the line buffer
+        line.clear();
+        
+        // Asynchronously read a line from stdin
+        match stdin.read_line(&mut line).await {
+            Ok(0) => break, // EOF
+            Ok(_) => {
+                // Trim the newline character
+                let input = line.trim();
                 println!("\x1b[32m[send] {}\x1b[0m", input);
-                stdout.flush().unwrap();
+                std::io::stdout().flush().unwrap();
                 
                 if input == "exit" {
-                    println!("\x1b[31m[Sender] Closing stream sender and receiver... (note that the sender will be restarted on next send but the receiver is no longer running)\x1b[0m");
+                    println!("\x1b[31m[Sender] Closing stream sender and receiver...\x1b[0m");
                     skycurrent::backing::combined::close();
                 } else {
-                    let to_send = input.into_bytes();
+                    let to_send = input.as_bytes().to_vec();
                     skycurrent::send_stream(&to_send, 1);
                 }
             }

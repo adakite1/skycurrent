@@ -34,8 +34,17 @@ default = [
     "backing-iox2",
     "backing-ws-gateway"
 ]
+tokio-wasm = [
+    "tokio/sync", 
+    "tokio/macros", 
+    "tokio/io-util", 
+    "tokio/rt"
+]
 tokio = [
-    "tokio/full"
+    "tokio-wasm", 
+    "tokio/io-std", 
+    "tokio/time", 
+    "tokio/net"
 ]
 autodrop = [
     "dep:rand",
