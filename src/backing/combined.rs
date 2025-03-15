@@ -305,8 +305,8 @@ pub async fn wait_stream() -> Result<(), IpcError> {
 
         // IOX2_RECV_SENDER_TX
         if !cell[Backing::Iox2 as usize] {
-            cell.set(Backing::Iox2 as usize, true);
             actor_call!(IOX2_RECV_SENDER_TX, Iox2BackingMessage::WaitStream)?;
+            cell.set(Backing::Iox2 as usize, true);
         }
     }
     if let Some(wait_stream_rx) = WAIT_STREAM_RECEIVER.lock().as_mut() {
@@ -369,15 +369,59 @@ pub fn shutdown_signal() -> Result<(), IpcError> {
 /// 
 /// On some backings, this function is a no-op, but it should always be called before the thread using the library exits to give SkyCurrent a chance to clean up.
 pub fn close() -> Result<(), IpcError> {
-    // IOX2_RECV_SENDER_TX
-    let (send, recv) = crossbeam::channel::bounded(1);
-    actor_call!(IOX2_RECV_SENDER_TX, Iox2BackingMessage::Close { respond_to: send }, recv)?;
+    // IOX2_RECV_SENDER_TX (part 1)
+    let (send, iox2_recv_close_recv) = crossbeam::channel::bounded(1);
+    match actor_call!(IOX2_RECV_SENDER_TX, Iox2BackingMessage::Close { respond_to: send }) {
+        Err(e) => match e {
+            IpcError::NotInitialized | IpcError::BackingCrashed(_) => (),
+            IpcError::Iox2IpcError(_) => panic!("iox2 backend close is a no-op. this should never happen."),
+        },
+        Ok(_) => (),
+    }
+    let _ = IOX2_RECV_SENDER_TX.write().take();
+
+    // All possibly blocked threads have now been sent a Close actor call. Now to get them to break out of their blocked states, we send the shutdown signal.
+    while let Err(e) = shutdown_signal() {
+        match e {
+            IpcError::NotInitialized => {
+                eprintln!("WARNING: combined runtime was not initialized with the ability to send shutdown signals; `close` will block until `wait_stream` calls currently executing in other threads naturally exits!");
+                break;
+            },
+            IpcError::BackingCrashed(_) => {
+                eprintln!("WARNING: some backings crashed while delivering the shutdown signal; `close` will block until `wait_stream` calls currently executing in other threads naturally exits!");
+                break;
+            },
+            IpcError::Iox2IpcError(e) => match e {
+                super::iox2::IpcError::NotInitialized => panic!("if send flag was set, the thread meant for iox2 sending would definitely have been initialized for sending. this should never happen."),
+                super::iox2::IpcError::Iox2NotifierNotifyError(notifier_notify_error) => {
+                    eprintln!("WARNING: iox2 backend notify error encountered while trying to send the shutdown signal; will retry in 100ms! {:?}", notifier_notify_error);
+
+                    // Sleep for a while, then retry.
+                    thread::sleep(Duration::from_millis(100));
+
+                    continue;
+                },
+                e => panic!("error '{:?}' should not be possible from trying to send a shutdown signal. this should never happen.", e)
+            },
+        }
+    }
+
+    // Join all receiver threads.
+    // IOX2_RECV_SENDER_TX (part 2)
+    let _ = iox2_recv_close_recv.recv();
     actor_join!(IOX2_RECV_THREAD_JOIN_HANDLE)?;
 
     // IOX2_SEND_SENDER_TX
     let (send, recv) = crossbeam::channel::bounded(1);
     actor_call!(IOX2_SEND_SENDER_TX, Iox2BackingMessage::Close { respond_to: send }, recv)?;
+    let _ = IOX2_SEND_SENDER_TX.write().take();
     actor_join!(IOX2_SEND_THREAD_JOIN_HANDLE)?;
+
+    // Reset WAIT_STREAM_LOCKS to zeroes.
+    WAIT_STREAM_LOCKS.write().fill(false);
+
+    // Reset WAIT_STREAM_RECEIVER.
+    *WAIT_STREAM_RECEIVER.lock() = None;
 
     Ok(())
 }
