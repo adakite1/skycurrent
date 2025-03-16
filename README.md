@@ -12,7 +12,7 @@ fn should_collect(header: &[u8]) -> bool {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> tokio::io::Result<()> {
     // SkyCurrent works on a per-project-directory basis
     let current_dir = std::env::current_dir()?;
 
@@ -30,7 +30,7 @@ async fn main() -> Result<()> {
     loop {
         let message = message_consumer.next().await;
 
-        println!("{:?}", message.read());
+        println!("{:?}", *message.read().expect("messages that have been claimed or recycled will return None here."));
     }
 }
 ```
