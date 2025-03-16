@@ -3,3 +3,4 @@ members = [
     "lmq",
     "skycurrent"
 ]
+resolver = "3"
