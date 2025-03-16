@@ -1,5 +1,4 @@
 pub mod hasher;
-pub mod queue;
 
 pub mod backing;
 

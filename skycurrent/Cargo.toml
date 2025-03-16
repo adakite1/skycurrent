@@ -1,0 +1,66 @@
+[package]
+name = "skycurrent"
+version = "0.1.0"
+edition = "2024"
+repository = "https://github.com/adakite1/skycurrent"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+lmq = { path = "../lmq" }
+thiserror = "2"
+dunce = { version = "1.0", optional = true }
+bitflags = "2.9"
+bitvec = "1"
+pollster = "0.4"
+rand = { version = "0.9.0", optional = true }
+postage = { version = "0.5", optional = true }
+crossbeam = "0.8"
+tokio = { version = "1.0", features = ["sync"], default-features = false }
+parking_lot = { version = "0.12", features = ["send_guard"] }
+iceoryx2 = { git = "https://github.com/eclipse-iceoryx/iceoryx2.git", rev = "b7fc3bf", optional = true }
+iceoryx2-bb-system-types = { git = "https://github.com/eclipse-iceoryx/iceoryx2.git", rev = "b7fc3bf", optional = true }
+iceoryx2-bb-container = { git = "https://github.com/eclipse-iceoryx/iceoryx2.git", rev = "b7fc3bf", optional = true }
+iceoryx2-cal = { git = "https://github.com/eclipse-iceoryx/iceoryx2.git", rev = "b7fc3bf", optional = true }
+hyper = { version = "1", features = ["full"], optional = true }
+http-body-util = { version = "0.1", optional = true }
+hyper-util = { version = "0.1", features = ["full"], optional = true }
+fastwebsockets = { version = "0.10", features = ["upgrade"], optional = true }
+
+[dev-dependencies]
+tracing = "0.1"
+tracing-subscriber = "0.3.0"
+
+[features]
+default = [
+    "tokio",
+    "backing-iox2",
+    "backing-ws-gateway"
+]
+tokio-wasm = [
+    "tokio/sync", 
+    "tokio/macros", 
+    "tokio/io-util", 
+    "tokio/rt"
+]
+tokio = [
+    "tokio-wasm", 
+    "tokio/io-std", 
+    "tokio/time", 
+    "tokio/net"
+]
+backing-iox2 = [
+    "dep:dunce",
+    "dep:rand",
+    "dep:iceoryx2", 
+    "dep:iceoryx2-bb-system-types", 
+    "dep:iceoryx2-bb-container", 
+    "dep:iceoryx2-cal"
+]
+backing-ws-gateway = [
+    "tokio",
+    "dep:postage",
+    "dep:hyper",
+    "dep:http-body-util",
+    "dep:hyper-util",
+    "dep:fastwebsockets"
+]

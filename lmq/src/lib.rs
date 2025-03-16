@@ -1,3 +1,10 @@
+//! A message queue based on a linked list structure that allows consumption of any message in the queue 
+//! and for messages to be processed and claimed atomically and independent of other consumers.
+
+#![forbid(unsafe_code)]
+
+pub mod hasher;
+
 use std::sync::Arc;
 
 use parking_lot::{Mutex, RwLock};
