@@ -1,0 +1,26 @@
+{
+    "name": "skycurrent",
+    "version": "0.1.0",
+    "description": "Universal IPC",
+    "main": "dist/index.js",
+    "types": "dist/index.d.ts",
+    "scripts": {
+        "build": "tsc"
+    },
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/adakite1/skycurrent.git"
+    },
+    "author": "adakite1 <adakite.a@gmail.com>",
+    "license": "(MIT OR Apache-2.0)",
+    "bugs": {
+        "url": "https://github.com/adakite1/skycurrent/issues"
+    },
+    "homepage": "https://github.com/adakite1/skycurrent#readme",
+    "dependencies": {
+        "lmq": "file:../lmq/pkg"
+    },
+    "devDependencies": {
+        "typescript": "^5.8.2"
+    }
+}

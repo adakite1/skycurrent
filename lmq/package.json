@@ -1,0 +1,24 @@
+{
+    "name": "lmq",
+    "version": "0.1.0",
+    "description": "Linked Message Queue bindings using WebAssembly",
+    "main": "pkg/lmq.js",
+    "types": "pkg/lmq.d.ts",
+    "scripts": {
+        "build": "wasm-pack build --target web --out-dir pkg --features wasm"
+    },
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/adakite1/skycurrent.git"
+    },
+    "files": [
+        "pkg/**/*"
+    ],
+    "author": "adakite1 <adakite.a@gmail.com>",
+    "license": "(MIT OR Apache-2.0)",
+    "bugs": {
+        "url": "https://github.com/adakite1/skycurrent/issues"
+    },
+    "homepage": "https://github.com/adakite1/skycurrent#readme"
+}
+
