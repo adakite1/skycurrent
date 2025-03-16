@@ -48,7 +48,13 @@ async fn main() -> tokio::io::Result<()> {
             break message.claim().unwrap();
         }
     };
+    drop(seeker);
     println!("{:?}", reply);
+
+    // By default, the "backing-ws-gateway" feature is also enabled, which creates a websocket server on port 8367 (only accessible from localhost or null origin client), allowing webpages to also participate in the messaging.
+    // A client library for that has not yet been written, but in general the wire format is straightforward:
+    // - Send and receive ArrayBuffers through the WebSocket WebAPI
+    // - Messages follow the format "<actual binary data><8-bytes little-endian representing header size>"
 
     Ok(())
 }
