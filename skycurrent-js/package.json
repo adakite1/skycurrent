@@ -22,5 +22,8 @@
     },
     "devDependencies": {
         "typescript": "^5.8.2"
-    }
+    },
+    "bundleDependencies": [
+        "lmq"
+    ]
 }
