@@ -32,6 +32,25 @@ async fn main() -> tokio::io::Result<()> {
 
         println!("{:?}", *message.read().expect("messages that have been claimed or recycled will return None here."));
     }
+
+    // SkyCurrent keeps track of all active MessageConsumers.
+    // When a new message arrives, a snapshot of all active consumers is taken.
+    // When all consumers pertaining to a message in this way are either dropped or passes on the message, the message is automatically dropped/claimed.
+    // Messages can be claimed manually by calling `message.claim()` instead of `message.read()`.
+
+    // Send and receive messages together like this
+    // (If a reply is expected from a message, you must use this pattern to capture any replies)
+    let to_send = String::from("example message").as_bytes().to_vec();
+    let mut seeker = skycurrent::dlg_stream(&to_send, 1);  // Same parameters as `send_stream`.
+    let reply = loop {
+        let message = seeker.next().await;
+        if *message.read().unwrap() == ['a' as u8, ' ' as u8, 'r' as u8, 'e' as u8, 'p' as u8, 'l' as u8, 'y' as u8] {
+            break message.claim().unwrap();
+        }
+    };
+    println!("{:?}", reply);
+
+    Ok(())
 }
 ```
 
