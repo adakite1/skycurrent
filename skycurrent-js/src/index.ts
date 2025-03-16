@@ -5,12 +5,36 @@ const WEBSOCKET_PORT = 8367;
 // Initialize lmq.
 await lmq.default();
 
-// Global state.
-const GLOBAL_LINK_MESSAGE_QUEUE = new lmq.LinkMessageQueue();
-let webSocket: WebSocket | null = null;
-let isConnectedInternal = false;
-let connectionListeners: Array<(connected: boolean) => void> = [];
-const reconnectInterval = 1000; // ms
+// Define types for global state.
+interface SkyCurrentStreamGlobals {
+  queue: lmq.LinkMessageQueue;
+  webSocket: WebSocket | null;
+  isConnectedInternal: boolean;
+  connectionListeners: Array<(connected: boolean) => void>;
+  reconnectInterval: number;
+}
+
+// Ensure the global namespace exists.
+(globalThis as any).__skycurrentstreamglobals = (globalThis as any).__skycurrentstreamglobals || {};
+const globals = (globalThis as any).__skycurrentstreamglobals as SkyCurrentStreamGlobals;
+
+// Initialize globals if they don't exist.
+// This is why we can omit ? from the fields of the interface definition above.
+if (globals.queue === undefined) {
+  globals.queue = new lmq.LinkMessageQueue();
+}
+if (globals.webSocket === undefined) {
+  globals.webSocket = null;
+}
+if (globals.isConnectedInternal === undefined) {
+  globals.isConnectedInternal = false;
+}
+if (globals.connectionListeners === undefined) {
+  globals.connectionListeners = [];
+}
+if (globals.reconnectInterval === undefined) {
+  globals.reconnectInterval = 1000;  //ms
+}
 
 /**
  * Initialize
@@ -19,32 +43,32 @@ const reconnectInterval = 1000; // ms
  */
 export function init(): Promise<void> {
   return new Promise((resolve, reject) => {
-    if (!webSocket) {
+    if (!globals.webSocket) {
       // Create WebSocket and set up automatic reconnection.
       connectWebSocket();
     }
 
     // Just in case if connection in progress, add listeners first.
-    webSocket!.addEventListener("open", () => {
+    globals.webSocket!.addEventListener("open", () => {
       resolve();
     }, { once: true });
     // Watch for errors.
-    webSocket!.addEventListener("error", () => {
+    globals.webSocket!.addEventListener("error", () => {
       // In case we've connected but an error occurs afterwards.
-      if (!isConnectedInternal) {
+      if (!globals.isConnectedInternal) {
         reject(new Error("Disconnected from SkyCurrent WebSocket gateway"));
       }
     }, { once: true });
     // Watch for close.
-    webSocket!.addEventListener("close", () => {
+    globals.webSocket!.addEventListener("close", () => {
       reject(new Error("Disconnected from SkyCurrent WebSocket gateway"));
     }, { once: true });
 
     // Check connection state using readyState.
-    if (webSocket!.readyState === WebSocket.OPEN) {
+    if (globals.webSocket!.readyState === WebSocket.OPEN) {
       // Already connected.
       resolve();
-    } else if (webSocket?.readyState === WebSocket.CLOSING || webSocket?.readyState === WebSocket.CLOSED) {
+    } else if (globals.webSocket!.readyState === WebSocket.CLOSING || globals.webSocket!.readyState === WebSocket.CLOSED) {
       // CLOSING or CLOSED state - create a new connection.
       connectWebSocket();
     }/* else if (webSocket.readyState === WebSocket.CONNECTING) {  }*/
@@ -56,26 +80,26 @@ export function init(): Promise<void> {
  */
 function connectWebSocket() {
   try {
-    webSocket = new WebSocket(`ws://localhost:${WEBSOCKET_PORT}`);
+    globals.webSocket = new WebSocket(`ws://localhost:${WEBSOCKET_PORT}`);
 
-    webSocket.binaryType = "arraybuffer";
+    globals.webSocket.binaryType = "arraybuffer";
 
-    webSocket.addEventListener("open", () => {
-      isConnectedInternal = true;
+    globals.webSocket.addEventListener("open", () => {
+      globals.isConnectedInternal = true;
       notifyConnectionListeners();
       console.log("Connected to gateway!");
     });
 
-    webSocket.addEventListener("close", () => {
-      isConnectedInternal = false;
+    globals.webSocket.addEventListener("close", () => {
+      globals.isConnectedInternal = false;
       notifyConnectionListeners();
-      console.log(`Disconnected from SkyCurrent WebSocket gateway server, will attempt to reconnect in ${reconnectInterval}ms...`);
+      console.log(`Disconnected from SkyCurrent WebSocket gateway server, will attempt to reconnect in ${globals.reconnectInterval}ms...`);
 
       // Try to reconnect after interval.
-      setTimeout(init, reconnectInterval);
+      setTimeout(init, globals.reconnectInterval);
     });
 
-    webSocket.addEventListener("message", (event) => {
+    globals.webSocket.addEventListener("message", (event) => {
       if (event.data instanceof ArrayBuffer) {
         const buffer = new Uint8Array(event.data);
 
@@ -88,16 +112,16 @@ function connectWebSocket() {
         const actualData = buffer.slice(0, buffer.length - 8);
 
         // Add message to the global queue.
-        GLOBAL_LINK_MESSAGE_QUEUE.push(actualData);
+        globals.queue.push(actualData);
       }
     });
   } catch (error) {
     console.error("Error connecting to WebSocket:", error);
-    isConnectedInternal = false;
+    globals.isConnectedInternal = false;
     notifyConnectionListeners();
 
     // Try to reconnect after interval.
-    setTimeout(init, reconnectInterval);
+    setTimeout(init, globals.reconnectInterval);
   }
 }
 
@@ -124,8 +148,8 @@ export function sendStream(payload: Uint8Array | Array<number>, headerSize: numb
 
     // Function to attempt sending.
     const attemptSend = () => {
-      if (webSocket && webSocket.readyState === WebSocket.OPEN) {
-        webSocket.send(resultBuffer);  // Browser will only throw if we try to send when WebSocket is in CONNECTING state, which it isn't, so this is alright.
+      if (globals.webSocket && globals.webSocket.readyState === WebSocket.OPEN) {
+        globals.webSocket.send(resultBuffer);  // Browser will only throw if we try to send when WebSocket is in CONNECTING state, which it isn't, so this is alright.
         resolve();
       } else {
         // Not connected, wait for connection.
@@ -163,7 +187,7 @@ export async function dlgStream(payload: Uint8Array | Array<number>, headerSize:
  * @returns MessageConsumer for iterating through messages
  */
 export function iterStream(): lmq.MessageConsumer {
-  return GLOBAL_LINK_MESSAGE_QUEUE.create_consumer();
+  return globals.queue.create_consumer();
 }
 
 /**
@@ -172,7 +196,7 @@ export function iterStream(): lmq.MessageConsumer {
  * @returns Current connection status
  */
 export function isConnected(): boolean {
-  return isConnectedInternal;
+  return globals.isConnectedInternal;
 }
 
 /**
@@ -182,14 +206,14 @@ export function isConnected(): boolean {
  * @returns Function to remove the listener
  */
 export function onConnectionChange(listener: (connected: boolean) => void): () => void {
-  connectionListeners.push(listener);
+  globals.connectionListeners.push(listener);
 
   // Notify immediately of current state.
-  listener(isConnectedInternal);
+  listener(globals.isConnectedInternal);
 
   // Return function to remove listener.
   return () => {
-    connectionListeners = connectionListeners.filter((l) => l !== listener);
+    globals.connectionListeners = globals.connectionListeners.filter((l) => l !== listener);
   };
 }
 
@@ -197,9 +221,9 @@ export function onConnectionChange(listener: (connected: boolean) => void): () =
  * Notify all connection listeners of current status
  */
 function notifyConnectionListeners() {
-  for (const listener of connectionListeners) {
+  for (const listener of globals.connectionListeners) {
     try {
-      listener(isConnectedInternal);
+      listener(globals.isConnectedInternal);
     } catch (error) {
       console.error("Error in connection listener:", error);
     }
@@ -210,10 +234,10 @@ function notifyConnectionListeners() {
  * Close the WebSocket connection
  */
 export function close(): void {
-  if (webSocket) {
-    const socket = webSocket;
-    webSocket = null;
-    isConnectedInternal = false;
+  if (globals.webSocket) {
+    const socket = globals.webSocket;
+    globals.webSocket = null;
+    globals.isConnectedInternal = false;
     notifyConnectionListeners();
     socket.close();
   }
