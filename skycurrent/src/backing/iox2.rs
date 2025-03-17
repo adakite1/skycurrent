@@ -118,7 +118,7 @@ pub enum InitError {
 /// 
 /// Initialize takes a `path` pointing to a project folder and sets up only the IPC part if it does not exist already. Otherwise, it is a no-op.
 pub fn init(path: &Path, flags: InitFlags) -> Result<(), InitError> {
-    let ProjectDirectoryPaths { root: path, res: _, tmp } = super::common::build_project_dir_structure(path)?;
+    let ProjectDirectoryPaths { root: path, tmp } = super::common::build_project_dir_structure(path)?;
 
     // IPC setup
     // Set up a root directory for iceoryx2.

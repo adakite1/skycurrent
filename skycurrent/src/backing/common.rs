@@ -138,7 +138,6 @@ pub enum InitError {
 
 pub(crate) struct ProjectDirectoryPaths {
     pub root: PathBuf,
-    pub res: PathBuf,
     pub tmp: PathBuf,
 }
 pub(crate) fn build_project_dir_structure(path_ref: &Path) -> Result<ProjectDirectoryPaths, InitError> {
@@ -158,16 +157,12 @@ pub(crate) fn build_project_dir_structure(path_ref: &Path) -> Result<ProjectDire
     }
 
     // Set up common temporary directories.
-    //  The res/ directory is for things that should not be checked into git but still makes sense to be kept around for a long time.
     //  The tmp/ directory is for things that should not be checked into git as they are temporary files.
-    let res = path.join("res");
     let tmp = path.join("tmp");
-    std::fs::create_dir_all(&res).map_err(|e| InitError::CreateDirError(res.to_path_buf(), e.kind()))?;
     std::fs::create_dir_all(&tmp).map_err(|e| InitError::CreateDirError(tmp.to_path_buf(), e.kind()))?;
 
     Ok(ProjectDirectoryPaths {
         root: path,
-        res,
         tmp,
     })
 }
