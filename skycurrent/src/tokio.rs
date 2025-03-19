@@ -97,17 +97,6 @@ pub async fn init() {
     });
 }
 
-/// Send an arbitrarily-sized payload, expecting responses to that payload afterwards.
-/// 
-/// If a message is sent with the expectation of a reply and the `autodrop` feature is enabled, [`dlg_stream`] must be used over [`send_stream`] for that purpose.
-/// 
-/// The returned [`MessageConsumer`] can be used to receive any subsequent messages that could potentially be replies to this message.
-pub fn dlg_stream(payload: &[u8], header_size: usize) -> MessageConsumer {
-    let consumer = iter_stream();
-    send_stream(payload, header_size);
-    consumer
-}
-
 /// Send an arbitrarily-sized payload.
 /// 
 /// Since this might require reassembly of data on the receiver-side on certain backings, all payloads should have a small header section so that receivers can decide if they want to reconstruct the message or pass on it, saving memory and execution time.

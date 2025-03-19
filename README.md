@@ -38,10 +38,19 @@ async fn main() -> tokio::io::Result<()> {
     // When all consumers pertaining to a message in this way are either dropped or passes on the message, the message is automatically dropped/claimed.
     // Messages can be claimed manually by calling `message.claim()` instead of `message.read()`.
 
+    /// Send an arbitrarily-sized payload, expecting responses to that payload afterwards.
+    /// 
+    /// This is an example for how you might structure this. `MessageConsumer`'s must be created before sending the message.
+    fn dlg_stream(payload: &[u8], header_size: usize) -> MessageConsumer {
+        let consumer = skycurrent::iter_stream();
+        skycurrent::send_stream(payload, header_size);
+        consumer
+    }
+
     // Send and receive messages together like this
     // (If a reply is expected from a message, you must use this pattern to capture any replies)
     let to_send = String::from("example message").as_bytes().to_vec();
-    let mut seeker = skycurrent::dlg_stream(&to_send, 1);  // Same parameters as `send_stream`.
+    let mut seeker = dlg_stream(&to_send, 1);  // Same parameters as `send_stream`.
     let reply = loop {
         let message = seeker.next().await;
         if *message.read().unwrap() == ['a' as u8, ' ' as u8, 'r' as u8, 'e' as u8, 'p' as u8, 'l' as u8, 'y' as u8] {
