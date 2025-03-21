@@ -169,19 +169,6 @@ export function sendStream(payload: Uint8Array | Array<number>, headerSize: numb
 }
 
 /**
- * Send a message and prepare to receive replies
- * 
- * @param payload The data to send
- * @param headerSize Size of the header section in bytes
- * @returns Promise that resolves with a MessageConsumer for receiving potential replies once the message is sent
- */
-export async function dlgStream(payload: Uint8Array | Array<number>, headerSize: number): Promise<lmq.MessageConsumer> {
-  const consumer = iterStream();
-  await sendStream(payload, headerSize);
-  return consumer;
-}
-
-/**
  * Get an iterator over the message stream
  * 
  * @returns MessageConsumer for iterating through messages
