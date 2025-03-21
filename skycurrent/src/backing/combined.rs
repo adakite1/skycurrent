@@ -62,7 +62,10 @@ enum Iox2BackingMessage {
     },
 }
 
-pub type ShouldCollectCallback = Arc<dyn Fn(&[u8]) -> bool + Send + Sync + 'static>;
+pub trait ShouldCollect: Fn(&[u8]) -> bool + Send + Sync + 'static {  }
+impl<I: Fn(&[u8]) -> bool + Send + Sync + 'static> ShouldCollect for I {  }
+
+type ShouldCollectCallback = Arc<dyn ShouldCollect>;
 
 static GLOBAL_PROJECT_DIR: LazyLock<Mutex<Option<PathBuf>>> = LazyLock::new(|| Mutex::new(None));
 static GLOBAL_SHOULD_COLLECT: LazyLock<Mutex<Option<ShouldCollectCallback>>> = LazyLock::new(|| Mutex::new(None));
@@ -105,8 +108,8 @@ pub fn set_global_project_dir(project_dir: impl AsRef<Path>) {
 }
 
 /// Sets the global `should_collect` callback, required for certain backings.
-pub fn set_global_should_collect(should_collect: ShouldCollectCallback) {
-    *GLOBAL_SHOULD_COLLECT.lock() = Some(should_collect);
+pub fn set_global_should_collect(should_collect: impl ShouldCollect) {
+    *GLOBAL_SHOULD_COLLECT.lock() = Some(Arc::new(should_collect));
 }
 
 /// Possible errors during initialization.
