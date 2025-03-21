@@ -62,7 +62,7 @@ enum Iox2BackingMessage {
     },
 }
 
-pub type ShouldCollectCallback = fn(&[u8]) -> bool;
+pub type ShouldCollectCallback = Arc<dyn Fn(&[u8]) -> bool + Send + Sync + 'static>;
 
 static GLOBAL_PROJECT_DIR: LazyLock<Mutex<Option<PathBuf>>> = LazyLock::new(|| Mutex::new(None));
 static GLOBAL_SHOULD_COLLECT: LazyLock<Mutex<Option<ShouldCollectCallback>>> = LazyLock::new(|| Mutex::new(None));
@@ -157,7 +157,7 @@ pub async fn init(flags: InitFlags) -> Result<(), InitError> {
                             let _ = respond_to.send(super::iox2::init(&path, flags));
                         },
                         Iox2BackingMessage::TryRecvStream { should_collect, respond_to } => {
-                            let _ = respond_to.send(super::iox2::try_recv_stream(should_collect));
+                            let _ = respond_to.send(super::iox2::try_recv_stream(&*should_collect));
                         },
                         Iox2BackingMessage::WaitStream => {
                             if let Some(respond_to_wait_stream) = respond_to_wait_stream.as_ref() {
@@ -289,7 +289,7 @@ pub fn try_recv_stream() -> Result<TryRecvStreamResult, IpcError> {
             #[cfg(feature = "backing-iox2")]
             Backing::Iox2 => {
                 let (send, recv) = crossbeam::channel::bounded(1);
-                actor_call!(IOX2_RECV_SENDER_TX, Iox2BackingMessage::TryRecvStream { should_collect: should_collect.ok_or(IpcError::MissingGlobalShouldCollect(String::from("iox2")))?, respond_to: send }, recv)
+                actor_call!(IOX2_RECV_SENDER_TX, Iox2BackingMessage::TryRecvStream { should_collect: should_collect.clone().ok_or(IpcError::MissingGlobalShouldCollect(String::from("iox2")))?, respond_to: send }, recv)
             },
             #[cfg(not(feature = "backing-iox2"))]
             Backing::Iox2 => panic!("not built with backing '{}'. this should never happen.", backing),
