@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "lmq",
-    "skycurrent"
+    "lmq-capi",
+    "skycurrent",
 ]
 resolver = "3"

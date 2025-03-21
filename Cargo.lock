@@ -804,6 +804,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lmq-capi"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "lmq",
+ "tokio",
+]
+
+[[package]]
 name = "lock_api"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
