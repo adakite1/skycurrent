@@ -7,11 +7,12 @@ repository = "https://github.com/adakite1/skycurrent"
 license = "MIT OR Apache-2.0"
 
 [lib]
-crate-type = ["staticlib", "cdylib", "rlib"]
+name = "lmq"
+crate-type = ["staticlib", "cdylib"]
 
 [dependencies]
 libc = "0.2"
-lmq = { path = "../lmq", default-features = false }
+lmq-rs = { package = "lmq", path = "../lmq", default-features = false }
 tokio = { version = "1.0", optional = true, default-features = false }
 
 [features]
@@ -20,7 +21,7 @@ default = [
     "tokio"
 ]
 autodrop = [
-    "lmq/autodrop"
+    "lmq-rs/autodrop"
 ]
 tokio = [
     "dep:tokio", 

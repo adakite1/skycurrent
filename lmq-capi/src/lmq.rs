@@ -1,6 +1,6 @@
 use std::{ffi::c_void, panic};
 
-use lmq::{LinkMessageQueue, MessageConsumer, MessageRef, NextMessage};
+use lmq_rs::{LinkMessageQueue, MessageConsumer, MessageRef, NextMessage};
 
 #[allow(non_camel_case_types)]
 pub struct lmq_t(LinkMessageQueue);
