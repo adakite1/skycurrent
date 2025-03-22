@@ -6,3 +6,7 @@ members = [
     "skycurrent",
 ]
 resolver = "3"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
