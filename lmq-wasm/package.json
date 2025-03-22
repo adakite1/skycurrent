@@ -5,7 +5,7 @@
     "main": "pkg/lmq.js",
     "types": "pkg/lmq.d.ts",
     "scripts": {
-        "build": "wasm-pack build --target web --out-dir pkg --features wasm"
+        "build": "wasm-pack build --target web --out-dir pkg"
     },
     "repository": {
         "type": "git",

@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "lmq",
+    "lmq-wasm",
     "lmq-capi",
     "skycurrent",
 ]

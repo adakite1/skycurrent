@@ -794,13 +794,10 @@ checksum = "d26c52dbd32dccf2d10cac7725f8eae5296885fb5703b261f7d0a0739ec807ab"
 name = "lmq"
 version = "0.1.0"
 dependencies = [
- "getrandom 0.3.1",
  "parking_lot",
  "pollster 0.4.0",
  "rand 0.9.0",
  "tokio",
- "wasm-bindgen",
- "wasm-bindgen-futures",
 ]
 
 [[package]]
@@ -810,6 +807,16 @@ dependencies = [
  "libc",
  "lmq",
  "tokio",
+]
+
+[[package]]
+name = "lmq-wasm"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.3.1",
+ "lmq",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
 ]
 
 [[package]]

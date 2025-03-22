@@ -1,0 +1,24 @@
+[package]
+name = "lmq-wasm"
+version = "0.1.0"
+edition = "2024"
+description = "WASM API for the Linked Message Queue Rust library."
+repository = "https://github.com/adakite1/skycurrent"
+license = "MIT OR Apache-2.0"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+lmq = { path = "../lmq", default-features = false }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+getrandom = { version = "0.3", features = ["wasm_js"] }
+
+[features]
+default = [
+    "autodrop"
+]
+autodrop = [
+    "lmq/autodrop"
+]

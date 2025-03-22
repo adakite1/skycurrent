@@ -5,9 +5,6 @@
 
 pub mod hasher;
 
-#[cfg(feature = "wasm")]
-pub mod wasm;
-
 use std::sync::Arc;
 
 use parking_lot::{Mutex, RwLock};
