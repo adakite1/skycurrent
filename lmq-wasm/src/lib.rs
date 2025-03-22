@@ -1,14 +1,14 @@
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::js_sys::Uint8Array;
 
-use lmq::MessageRef;
+use lmq_rs::MessageRef;
 
 /// Linked message queue.
 /// 
 /// Must be freed with the `free` method after use.
 #[wasm_bindgen]
 pub struct LinkMessageQueue {
-    inner: lmq::LinkMessageQueue,
+    inner: lmq_rs::LinkMessageQueue,
 }
 
 #[wasm_bindgen]
@@ -16,7 +16,7 @@ impl LinkMessageQueue {
     #[wasm_bindgen(constructor)]
     pub fn new() -> Self {
         Self {
-            inner: lmq::LinkMessageQueue::new(),
+            inner: lmq_rs::LinkMessageQueue::new(),
         }
     }
     /// Push a message into the end of the queue.
@@ -38,7 +38,7 @@ impl LinkMessageQueue {
 /// Must be freed with the `free` method after use.
 #[wasm_bindgen]
 pub struct MessageConsumer {
-    inner: lmq::MessageConsumer,
+    inner: lmq_rs::MessageConsumer,
 }
 
 #[wasm_bindgen]
@@ -65,7 +65,7 @@ impl MessageConsumer {
 /// Must be freed with the `free` method after use. Freeing the message will also invalidate any read views obtained. It will not invalidate claimed data.
 #[wasm_bindgen]
 pub struct NextMessage {
-    inner: lmq::NextMessage,
+    inner: lmq_rs::NextMessage,
     read_ref: Option<MessageRef<'static>>,
 }
 

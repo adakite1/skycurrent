@@ -7,10 +7,11 @@ repository = "https://github.com/adakite1/skycurrent"
 license = "MIT OR Apache-2.0"
 
 [lib]
+name = "lmq"
 crate-type = ["cdylib"]
 
 [dependencies]
-lmq = { path = "../lmq", default-features = false }
+lmq-rs = { package = "lmq", path = "../lmq", default-features = false }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 getrandom = { version = "0.3", features = ["wasm_js"] }
@@ -20,5 +21,5 @@ default = [
     "autodrop"
 ]
 autodrop = [
-    "lmq/autodrop"
+    "lmq-rs/autodrop"
 ]

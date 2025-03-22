@@ -5,7 +5,7 @@
     "main": "pkg/lmq.js",
     "types": "pkg/lmq.d.ts",
     "scripts": {
-        "build": "wasm-pack build --target web --out-dir pkg"
+        "build": "wasm-pack build --target web --out-dir pkg && json -I -f pkg/package.json -e \"this.name='lmq'\""
     },
     "repository": {
         "type": "git",
@@ -19,6 +19,8 @@
     "bugs": {
         "url": "https://github.com/adakite1/skycurrent/issues"
     },
-    "homepage": "https://github.com/adakite1/skycurrent#readme"
+    "homepage": "https://github.com/adakite1/skycurrent#readme",
+    "devDependencies": {
+        "json": "^11.0.0"
+    }
 }
-
