@@ -1,6 +1,6 @@
 {
     "name": "lmq",
-    "version": "0.1.0",
+    "version": "0.1.1",
     "description": "Linked Message Queue bindings using WebAssembly",
     "main": "pkg/lmq.js",
     "types": "pkg/lmq.d.ts",

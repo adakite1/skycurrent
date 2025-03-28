@@ -15,6 +15,8 @@ pub struct LinkMessageQueue {
 impl LinkMessageQueue {
     #[wasm_bindgen(constructor)]
     pub fn new() -> Self {
+        // Set panic hook.
+        console_error_panic_hook::set_once();
         Self {
             inner: lmq_rs::LinkMessageQueue::new(),
         }
