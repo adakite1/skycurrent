@@ -1,5 +1,0 @@
-{
-  "imports": {
-    "lmq": "jsr:@lmq/web@^0.1.0"
-  }
-}

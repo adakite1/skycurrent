@@ -64,7 +64,7 @@ async fn main() -> tokio::io::Result<()> {
     skycurrent::close();
 
     // By default, the "backing-ws-gateway" feature is also enabled, which creates a websocket server on port 8367 (only accessible from localhost or null origin client), allowing webpages to also participate in the messaging.
-    // A client library is provided under the `skycurrent-js` folder, and the API mirrors the Rustlang tokio API closely. The wire format for communication over WebSocket is likewise straightforward:
+    // A client library is provided under the `skycurrent-ws-client` folder, and the API mirrors the Rustlang tokio API closely. The wire format for communication over WebSocket is likewise straightforward:
     // - Send and receive ArrayBuffers through the WebSocket WebAPI
     // - Messages follow the format "<actual binary data><8-bytes little-endian representing header size>"
 
