@@ -1,0 +1,27 @@
+{
+  "version": "4",
+  "specifiers": {
+    "jsr:@lmq/web@0.1": "0.1.0",
+    "npm:typescript@^5.8.2": "5.8.2"
+  },
+  "jsr": {
+    "@lmq/web@0.1.0": {
+      "integrity": "ce42ccc42609b432e996810d28972d445a1d44a4738f9d888b63f16d77527706"
+    }
+  },
+  "npm": {
+    "typescript@5.8.2": {
+      "integrity": "sha512-aJn6wq13/afZp/jT9QZmwEjDqqvSGp1VT5GVg+f/t6/oVyrgXM6BY1h9BRh/O5p3PlUPAe+WuiEZOmb/49RqoQ=="
+    }
+  },
+  "workspace": {
+    "dependencies": [
+      "jsr:@lmq/web@0.1"
+    ],
+    "packageJson": {
+      "dependencies": [
+        "npm:typescript@^5.8.2"
+      ]
+    }
+  }
+}
