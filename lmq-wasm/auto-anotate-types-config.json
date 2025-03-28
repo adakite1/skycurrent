@@ -1,0 +1,4 @@
+{
+    "from": "",
+    "to": "/* @ts-self-types=\"./lmq.d.ts\" */\n\n"
+}
