@@ -14,6 +14,22 @@ pub struct lmq_message_ref_t(MessageRef<'static>);
 #[allow(non_camel_case_types, dead_code)]
 pub struct lmq_vec_t(Vec<u8>);
 
+impl From<LinkMessageQueue> for lmq_t {
+    fn from(value: LinkMessageQueue) -> Self { Self(value) }
+}
+impl From<MessageConsumer> for lmq_consumer_t {
+    fn from(value: MessageConsumer) -> Self { Self(value) }
+}
+impl From<NextMessage> for lmq_message_t {
+    fn from(value: NextMessage) -> Self { Self(value) }
+}
+impl From<MessageRef<'static>> for lmq_message_ref_t {
+    fn from(value: MessageRef<'static>) -> Self { Self(value) }
+}
+impl From<Vec<u8>> for lmq_vec_t {
+    fn from(value: Vec<u8>) -> Self { Self(value) }
+}
+
 ffi_fn! {
     fn lmq_new() -> *mut lmq_t {
         Box::into_raw(Box::new(lmq_t(LinkMessageQueue::new())))

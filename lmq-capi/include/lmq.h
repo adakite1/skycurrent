@@ -1,5 +1,5 @@
-#ifndef _LMQ_H
-#define _LMQ_H
+#ifndef LMQ_H
+#define LMQ_H
 
 #include <stdbool.h>
 #include <stdint.h>

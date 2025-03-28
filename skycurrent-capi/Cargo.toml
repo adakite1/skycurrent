@@ -1,0 +1,31 @@
+[package]
+name = "skycurrent-capi"
+version = "0.1.0"
+edition = "2024"
+description = "C API for SkyCurrent."
+repository = "https://github.com/adakite1/skycurrent"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "skycurrent"
+crate-type = ["staticlib", "cdylib"]
+
+[dependencies]
+libc = "0.2"
+skycurrent-rs = { package = "skycurrent", path = "../skycurrent", default-features = false }
+lmq-capi = { path = "../lmq-capi", default-features = false }
+tokio = { version = "1.0", default-features = false }
+
+[features]
+default = [
+    "backing-iox2", 
+    "tokio/rt-multi-thread", 
+    "skycurrent-rs/tokio", 
+    # "backing-ws-gateway"
+]
+backing-iox2 = [
+    "skycurrent-rs/backing-iox2"
+]
+backing-ws-gateway = [
+    "skycurrent-rs/backing-ws-gateway"
+]

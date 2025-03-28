@@ -4,6 +4,7 @@ members = [
     "lmq-wasm",
     "lmq-capi",
     "skycurrent",
+    "skycurrent-capi",
 ]
 resolver = "3"
 
