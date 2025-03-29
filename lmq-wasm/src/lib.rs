@@ -77,7 +77,13 @@ impl NextMessage {
     /// 
     /// If called multiple times, only the view returned from the latest call is guaranteed to be valid.
     /// 
-    /// The view will remain valid until either the `NextMessage` is dropped or the data is claimed.
+    /// The view will remain valid until either the `NextMessage` is dropped, the data is claimed, or WASM memory is reallocated due to being full.
+    /// 
+    /// Refrain from calling any other lmq functions for as long as the data view is needed, as subsequent calls 
+    /// 
+    /// (and especially any `push` calls) have the possibility of invalidating the view from a WASM memory resize.
+    /// 
+    /// Once a view is obtained, do not await in JavaScript until the `NextMessage` is freed.
     /// 
     /// Returns `undefined` if the message has since been claimed.
     #[wasm_bindgen]
