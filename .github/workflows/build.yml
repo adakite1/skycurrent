@@ -1,0 +1,100 @@
+name: Build Dynamic Libraries
+
+on:
+  push:
+    tags:
+      - "*"
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+jobs:
+  build:
+    name: ${{matrix.config.name}}
+    runs-on: ${{matrix.config.os}}
+    strategy:
+      matrix:
+        config:
+          - { name: "Ubuntu", os: "ubuntu-latest" }
+          - { name: "macOS", os: "macos-latest" }
+          - { name: "Windows", os: "windows-latest" }
+    permissions:
+      contents: write
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        fetch-tags: true
+    
+    - shell: bash
+      run: |
+        git fetch --tags --force
+        VERSION=$(git -C '${{github.workspace}}' describe --first-parent)
+        PLATFORM=$(echo ${{matrix.config.name}} | tr [:upper:] [:lower:] | sed 's/ /_/g')
+        echo "FILENAME=skycurrent_libs_${VERSION}_${PLATFORM}" >> $GITHUB_ENV
+        echo "RELEASENAME=skycurrent_${VERSION}" >> $GITHUB_ENV
+    
+    - name: Build
+      run: |
+        cargo build -p lmq-capi
+        cargo build -p lmq-capi --release
+        cargo build -p skycurrent-capi
+        cargo build -p skycurrent-capi --release
+    
+    - name: Build (x86_64-apple-darwin)
+      if: matrix.config.name == 'macOS'
+      run: |
+        rustup target add x86_64-apple-darwin
+        cargo build -p lmq-capi --target x86_64-apple-darwin
+        cargo build -p lmq-capi --release --target x86_64-apple-darwin
+        cargo build -p skycurrent-capi --target x86_64-apple-darwin
+        cargo build -p skycurrent-capi --release --target x86_64-apple-darwin
+    
+    - uses: actions/upload-artifact@v4
+      with:
+        name: ${{env.FILENAME}}
+        path: target/
+    
+    - name: Create Universal Binary
+      if: matrix.config.name == 'macOS'
+      run: |
+        cp target/release/liblmq.dylib liblmq.aarch64.dylib
+        cp target/release/libskycurrent.dylib libskycurrent.aarch64.dylib
+        cp target/x86_64-apple-darwin/release/liblmq.dylib liblmq.x86_64.dylib
+        cp target/x86_64-apple-darwin/release/libskycurrent.dylib libskycurrent.x86_64.dylib
+        lipo liblmq.aarch64.dylib liblmq.x86_64.dylib -output liblmq.dylib -create
+        lipo libskycurrent.aarch64.dylib libskycurrent.x86_64.dylib -output libskycurrent.dylib -create
+
+    - name: Release (Ubuntu)
+      uses: softprops/action-gh-release@v2
+      if: (startsWith(github.ref, 'refs/tags/') && matrix.config.name == 'Ubuntu')
+      with:
+        name: ${{env.RELEASENAME}}
+        prerelease: true
+        files: |
+          target/release/liblmq.so
+          target/release/libskycurrent.so
+
+    - name: Release (macOS)
+      uses: softprops/action-gh-release@v2
+      if: (startsWith(github.ref, 'refs/tags/') && matrix.config.name == 'macOS')
+      with:
+        name: ${{env.RELEASENAME}}
+        prerelease: true
+        files: |
+          liblmq.aarch64.dylib
+          liblmq.x86_64.dylib
+          liblmq.dylib
+          libskycurrent.aarch64.dylib
+          libskycurrent.x86_64.dylib
+          libskycurrent.dylib
+    
+    - name: Release (Windows)
+      uses: softprops/action-gh-release@v2
+      if: (startsWith(github.ref, 'refs/tags/') && matrix.config.name == 'Windows')
+      with:
+        name: ${{env.RELEASENAME}}
+        prerelease: true
+        files: |
+          target/release/lmq.dll
+          target/release/skycurrent.dll
