@@ -5,7 +5,7 @@
     "main": "pkg/lmq.js",
     "types": "pkg/lmq.d.ts",
     "scripts": {
-        "build": "wasm-pack build --target web --out-dir pkg && json -I -f pkg/package.json -e \"this.name='lmq'\" && replace-in-file pkg/lmq.js --configFile=auto-anotate-types-config.json"
+        "build": "wasm-pack build --target web --out-dir pkg && cross-env-shell NPM_PACKAGE_VERSION=$npm_package_version json -I -f pkg/package.json -e 'this.name=`lmq-web`;this.version=`$NPM_PACKAGE_VERSION`' && replace-in-file pkg/lmq.js --configFile=auto-anotate-types-config.json"
     },
     "repository": {
         "type": "git",
@@ -21,6 +21,7 @@
     },
     "homepage": "https://github.com/adakite1/skycurrent#readme",
     "devDependencies": {
+        "cross-env": "^7.0.3",
         "json": "^11.0.0",
         "replace-in-file": "^8.3.0"
     }

@@ -1,4 +1,4 @@
-import * as lmq from "lmq";
+import * as lmq from "lmq-web";
 
 const WEBSOCKET_PORT = 8367;
 

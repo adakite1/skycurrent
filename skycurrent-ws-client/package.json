@@ -1,6 +1,6 @@
 {
     "name": "skycurrent",
-    "version": "0.1.5",
+    "version": "0.1.6",
     "description": "Universal IPC",
     "main": "dist/index.js",
     "types": "dist/index.d.ts",
@@ -18,12 +18,9 @@
     },
     "homepage": "https://github.com/adakite1/skycurrent#readme",
     "dependencies": {
-        "lmq": "file:../lmq-wasm/pkg"
+        "lmq-web": "^0.1.3"
     },
     "devDependencies": {
         "typescript": "^5.8.2"
-    },
-    "bundleDependencies": [
-        "lmq"
-    ]
+    }
 }
