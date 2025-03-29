@@ -2,9 +2,6 @@ import * as lmq from "lmq-web";
 
 const WEBSOCKET_PORT = 8367;
 
-// Initialize lmq.
-await lmq.default();
-
 // Define types for global state.
 interface SkyCurrentStreamGlobals {
   queue: lmq.LinkMessageQueue;
@@ -20,9 +17,6 @@ const globals = (globalThis as any).__skycurrentstreamglobals as SkyCurrentStrea
 
 // Initialize globals if they don't exist.
 // This is why we can omit ? from the fields of the interface definition above.
-if (globals.queue === undefined) {
-  globals.queue = new lmq.LinkMessageQueue();
-}
 if (globals.webSocket === undefined) {
   globals.webSocket = null;
 }
@@ -42,36 +36,44 @@ if (globals.reconnectInterval === undefined) {
  * @returns Promise that resolves when connection is established
  */
 export function init(): Promise<void> {
-  return new Promise((resolve, reject) => {
-    if (!globals.webSocket) {
-      // Create WebSocket and set up automatic reconnection.
-      connectWebSocket();
-    }
-
-    // Just in case if connection in progress, add listeners first.
-    globals.webSocket!.addEventListener("open", () => {
-      resolve();
-    }, { once: true });
-    // Watch for errors.
-    globals.webSocket!.addEventListener("error", () => {
-      // In case we've connected but an error occurs afterwards.
-      if (!globals.isConnectedInternal) {
-        reject(new Error("Disconnected from SkyCurrent WebSocket gateway"));
+  // Initialize lmq.
+  return lmq.default().catch(console.error).then(_wasm => {
+    return new Promise((resolve, reject) => {
+      // Initialize global queue if it doesn't exist.
+      if (globals.queue === undefined) {
+        globals.queue = new lmq.LinkMessageQueue();
       }
-    }, { once: true });
-    // Watch for close.
-    globals.webSocket!.addEventListener("close", () => {
-      reject(new Error("Disconnected from SkyCurrent WebSocket gateway"));
-    }, { once: true });
-
-    // Check connection state using readyState.
-    if (globals.webSocket!.readyState === WebSocket.OPEN) {
-      // Already connected.
-      resolve();
-    } else if (globals.webSocket!.readyState === WebSocket.CLOSING || globals.webSocket!.readyState === WebSocket.CLOSED) {
-      // CLOSING or CLOSED state - create a new connection.
-      connectWebSocket();
-    }/* else if (webSocket.readyState === WebSocket.CONNECTING) {  }*/
+  
+      if (!globals.webSocket) {
+        // Create WebSocket and set up automatic reconnection.
+        connectWebSocket();
+      }
+  
+      // Just in case if connection in progress, add listeners first.
+      globals.webSocket!.addEventListener("open", () => {
+        resolve();
+      }, { once: true });
+      // Watch for errors.
+      globals.webSocket!.addEventListener("error", () => {
+        // In case we've connected but an error occurs afterwards.
+        if (!globals.isConnectedInternal) {
+          reject(new Error("Disconnected from SkyCurrent WebSocket gateway"));
+        }
+      }, { once: true });
+      // Watch for close.
+      globals.webSocket!.addEventListener("close", () => {
+        reject(new Error("Disconnected from SkyCurrent WebSocket gateway"));
+      }, { once: true });
+  
+      // Check connection state using readyState.
+      if (globals.webSocket!.readyState === WebSocket.OPEN) {
+        // Already connected.
+        resolve();
+      } else if (globals.webSocket!.readyState === WebSocket.CLOSING || globals.webSocket!.readyState === WebSocket.CLOSED) {
+        // CLOSING or CLOSED state - create a new connection.
+        connectWebSocket();
+      }/* else if (webSocket.readyState === WebSocket.CONNECTING) {  }*/
+    });
   });
 }
 
