@@ -25,6 +25,12 @@ jobs:
       with:
         fetch-depth: 0
         fetch-tags: true
+    - uses: dtolnay/rust-toolchain@stable
+      if: matrix.config.name != 'macOS'
+    - uses: dtolnay/rust-toolchain@stable
+      if: matrix.config.name == 'macOS'
+      with:
+        targets: x86_64-apple-darwin
     
     - shell: bash
       run: |
@@ -33,6 +39,17 @@ jobs:
         PLATFORM=$(echo ${{matrix.config.name}} | tr [:upper:] [:lower:] | sed 's/ /_/g')
         echo "FILENAME=skycurrent_libs_${VERSION}_${PLATFORM}" >> $GITHUB_ENV
         echo "RELEASENAME=skycurrent_${VERSION}" >> $GITHUB_ENV
+    
+    - name: Feature Check
+      run: |
+        cargo tree -p lmq-capi -e features
+        cargo tree -p skycurrent-capi -e features
+    
+    - name: Feature Check (x86_64-apple-darwin)
+      if: matrix.config.name == 'macOS'
+      run: |
+        cargo tree -p lmq-capi -e features --target x86_64-apple-darwin
+        cargo tree -p skycurrent-capi -e features --target x86_64-apple-darwin
     
     - name: Build
       run: |
