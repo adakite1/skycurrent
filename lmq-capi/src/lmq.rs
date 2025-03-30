@@ -2,6 +2,13 @@ use std::{ffi::{c_int, c_void}, panic};
 
 use lmq_rs::{LinkMessageQueue, MessageConsumer, MessageRef, NextMessage};
 
+#[cfg(feature = "tokio")]
+use std::{collections::HashMap, sync::LazyLock};
+#[cfg(feature = "tokio")]
+use parking_lot::Mutex;
+#[cfg(feature = "tokio")]
+use tokio::task::JoinHandle;
+
 #[allow(non_camel_case_types)]
 pub struct lmq_t(LinkMessageQueue);
 #[allow(non_camel_case_types)]
@@ -89,13 +96,16 @@ pub enum lmq_action_t {
 }
 
 #[cfg(feature = "tokio")]
-thread_local! {
-    static TOKIO_RT: std::cell::LazyCell<tokio::runtime::Runtime>  = std::cell::LazyCell::new(|| tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .expect("failed to initialize tokio runtime!"));
-    static LMQ_WAIT_TASKS: std::cell::RefCell<std::collections::HashMap<(*const lmq_t, lmq_msg_callback_t), (tokio::task::JoinHandle<()>, tokio::sync::mpsc::Sender<lmq_resume_mode_t>)>> = std::cell::RefCell::new(std::collections::HashMap::new());
-}
+#[derive(PartialEq, Eq, Hash, Clone, Copy)]
+struct CallbackId(*const lmq_t, lmq_msg_callback_t);
+#[cfg(feature = "tokio")]
+unsafe impl Send for CallbackId {  }
+#[cfg(feature = "tokio")]
+unsafe impl Sync for CallbackId {  }
+#[cfg(feature = "tokio")]
+static TOKIO_RT: LazyLock<Mutex<Option<tokio::runtime::Runtime>>>  = LazyLock::new(|| Mutex::new(None));
+#[cfg(feature = "tokio")]
+static LMQ_WAIT_TASKS: LazyLock<Mutex<HashMap<CallbackId, (JoinHandle<()>, tokio::sync::mpsc::Sender<lmq_resume_mode_t>)>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 #[allow(non_camel_case_types)]
 pub type lmq_msg_callback_t = extern "C" fn(message: *mut lmq_message_t, user_data: *mut c_void) -> lmq_action_t;
@@ -110,7 +120,24 @@ impl From<UserData> for *mut c_void {
 }
 
 #[cfg(feature = "tokio")]
-fn abort_handler_backend(rt: &std::cell::LazyCell<tokio::runtime::Runtime>, handle: tokio::task::JoinHandle<()>) {
+fn deregister_handler(callback_id: &CallbackId, abort: Option<&tokio::runtime::Handle>, check_shutdown_tokio_runtime: bool) -> bool {
+    let mut lock = LMQ_WAIT_TASKS.lock();
+    let found_handler = if let Some((old_handle, _old_signal_tx)) = lock.remove(callback_id) {
+        if let Some(rt) = abort {
+            abort_handler_backend(rt, old_handle);
+        }
+        true
+    } else {
+        false
+    };
+    if check_shutdown_tokio_runtime && lock.is_empty() {
+        drop(TOKIO_RT.lock().take());
+    }
+    found_handler
+}
+
+#[cfg(feature = "tokio")]
+fn abort_handler_backend(rt: &tokio::runtime::Handle, handle: tokio::task::JoinHandle<()>) {
     handle.abort();
     match rt.block_on(handle) {
         Ok(_) => (),
@@ -126,65 +153,70 @@ ffi_fn! {
     fn lmq_register_handler(queue: *const lmq_t, callback: lmq_msg_callback_t, start_paused: bool, user_data: *mut c_void) {
         let queue_rust = unsafe { &*queue };
         let mut consumer = queue_rust.0.create_consumer();
+
+        let callback_id = CallbackId(queue, callback);
     
         // Make `user_data` Send by using a wrapper.
         let user_data = UserData(user_data);
-    
-        TOKIO_RT.with(|rt| {
-            let (signal_tx, mut signal_rx) = tokio::sync::mpsc::channel(1);
 
-            let join_handle = rt.spawn(async move {
-                let mut resume_mode = lmq_resume_mode_t::LMQ_RESUME_WAIT;
-                // If starting paused, wait for a resume signal before entering the main loop.
-                if start_paused {
-                    match signal_rx.recv().await {
-                        Some(new_resume_mode) => {
-                            resume_mode = new_resume_mode;
-                        },
-                        None => {
-                            // If the sender is gone, we have been deregistered.
-                            return;
-                        },
-                    }
+        let rt = {
+            TOKIO_RT.lock().get_or_insert_with(|| tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("failed to initialize tokio runtime!")).handle().clone()
+        };
+
+        let (signal_tx, mut signal_rx) = tokio::sync::mpsc::channel(1);
+        
+        let join_handle = rt.spawn(async move {
+            let mut resume_mode = lmq_resume_mode_t::LMQ_RESUME_WAIT;
+            // If starting paused, wait for a resume signal before entering the main loop.
+            if start_paused {
+                match signal_rx.recv().await {
+                    Some(new_resume_mode) => {
+                        resume_mode = new_resume_mode;
+                    },
+                    None => {
+                        // If the sender is gone, we have been deregistered.
+                        return;
+                    },
                 }
-                loop {
-                    let message = match resume_mode {
-                        lmq_resume_mode_t::LMQ_RESUME_WAIT => Box::into_raw(Box::new(lmq_message_t(consumer.next().await))),
-                        lmq_resume_mode_t::LMQ_RESUME_TRY => match consumer.try_next() {
-                            Some(message) => Box::into_raw(Box::new(lmq_message_t(message))),
-                            None => std::ptr::null_mut(),
-                        },
-                    };
-                    match callback(
-                        message,
-                        user_data.into()
-                    ) {
-                        lmq_action_t::LMQ_ACTION_CONTINUE => (),
-                        lmq_action_t::LMQ_ACTION_PAUSE => {
-                            match signal_rx.recv().await {
-                                Some(new_resume_mode) => {
-                                    resume_mode = new_resume_mode;
-                                },
-                                None => {
-                                    // If the sender is gone, we have been deregistered.
-                                    break;
-                                },
-                            }
-                        },
-                        lmq_action_t::LMQ_ACTION_DEREGISTER => {
-                            //TODO: Note that we don't remove ourselves from `LMQ_WAIT_TASKS` since it's not really necessary; awaiting our join handle will simply return immediately as we are exiting naturally, so if the same callback is ever re-registered, our handle will be cleaned up then. This behavior might need a second look at some point.
-                            break;
-                        },
-                    }
+            }
+            loop {
+                let message = match resume_mode {
+                    lmq_resume_mode_t::LMQ_RESUME_WAIT => Box::into_raw(Box::new(lmq_message_t(consumer.next().await))),
+                    lmq_resume_mode_t::LMQ_RESUME_TRY => match consumer.try_next() {
+                        Some(message) => Box::into_raw(Box::new(lmq_message_t(message))),
+                        None => std::ptr::null_mut(),
+                    },
+                };
+                match callback(
+                    message,
+                    user_data.into()
+                ) {
+                    lmq_action_t::LMQ_ACTION_CONTINUE => (),
+                    lmq_action_t::LMQ_ACTION_PAUSE => {
+                        match signal_rx.recv().await {
+                            Some(new_resume_mode) => {
+                                resume_mode = new_resume_mode;
+                            },
+                            None => {
+                                // If the sender is gone, we have been deregistered.
+                                break;
+                            },
+                        }
+                    },
+                    lmq_action_t::LMQ_ACTION_DEREGISTER => {
+                        let _ = deregister_handler(&callback_id, None, true);
+                        break;
+                    },
                 }
-            });
-    
-            LMQ_WAIT_TASKS.with_borrow_mut(|cell| {
-                if let Some((old_handle, _old_signal_tx)) = cell.insert((queue, callback), (join_handle, signal_tx)) {
-                    abort_handler_backend(rt, old_handle);
-                }
-            });
+            }
         });
+
+        if let Some((old_handle, _old_signal_tx)) = LMQ_WAIT_TASKS.lock().insert(callback_id, (join_handle, signal_tx)) {
+            abort_handler_backend(&rt, old_handle);
+        }
     }
 }
 
@@ -207,31 +239,26 @@ impl From<c_int> for lmq_resume_mode_t {
 #[cfg(feature = "tokio")]
 ffi_fn! {
     fn lmq_resume_handler(queue: *const lmq_t, callback: lmq_msg_callback_t, no_block: c_int) -> c_int {
-        LMQ_WAIT_TASKS.with_borrow(|cell| {
-            match cell.get(&(queue, callback)) {
-                Some((_, signal_tx)) => match signal_tx.blocking_send(no_block.into()) {
-                    Ok(_) => 0,  // handler resume signal sent.
-                    Err(_) => -1,  // handler is no longer running and cannot be resumed.
-                },
-                None => -1,  // handler is no longer running and cannot be resumed.
-            }
-        })
+        match LMQ_WAIT_TASKS.lock().get(&CallbackId(queue, callback)) {
+            Some((_, signal_tx)) => match signal_tx.blocking_send(no_block.into()) {
+                Ok(_) => 0,  // handler resume signal sent.
+                Err(_) => -1,  // handler is no longer running and cannot be resumed.
+            },
+            None => -1,  // handler is no longer running and cannot be resumed.
+        }
     }
 }
 
 #[cfg(feature = "tokio")]
 ffi_fn! {
     fn lmq_deregister_handler(queue: *const lmq_t, callback: lmq_msg_callback_t) -> bool {
-        TOKIO_RT.with(|rt| {
-            LMQ_WAIT_TASKS.with_borrow_mut(|cell| {
-                if let Some((old_handle, _old_signal_tx)) = cell.remove(&(queue, callback)) {
-                    abort_handler_backend(rt, old_handle);
-                    true
-                } else {
-                    false
-                }
-            })
-        })
+        let rt = {
+            TOKIO_RT.lock().get_or_insert_with(|| tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("failed to initialize tokio runtime!")).handle().clone()
+        };
+        deregister_handler(&CallbackId(queue, callback), Some(&rt), true)
     }
 }
 

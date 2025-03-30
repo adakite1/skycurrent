@@ -59,6 +59,10 @@ const lmq_msg_callback_registry = typeof FinalizationRegistry !== "undefined" ?
   new FinalizationRegistry(({queue, callback}: MessageCallbackId) => {
     ffi.lmq_deregister_handler(queue, callback);
   }) : undefined;
+const deno_callback_registry = typeof FinalizationRegistry !== "undefined" ? 
+  new FinalizationRegistry((callback: Deno.UnsafeCallback) => {
+    callback.close();
+  }) : undefined;
 
 /**
  * Message consumer.
@@ -78,20 +82,24 @@ export class MessageConsumer {
           "pointer", // void *user_data
         ],
         result: "i32", // lmq_action_t
-      },
+      } as const,
       (message, _user_data) => {
-        if (this.#_resolve) {
-          this.#_resolve(message ? NextMessage._createMessageFromRaw(message) : null);
-          this.#_resolve = undefined;
-          return lmq_action_t.LMQ_ACTION_PAUSE;
-        } else {
-          throw new Error("lmq internal error: message consumer no promises to give message to! this should never happen.");
-        }
+        setTimeout(() => {
+          if (this.#_resolve) {
+            const resolve = this.#_resolve;
+            this.#_resolve = undefined;
+            resolve(message ? NextMessage._createMessageFromRaw(message) : null);
+          } else {
+            throw new Error("lmq internal error: message consumer no promises to give message to! this should never happen.");
+          }
+        }, 0);
+        return lmq_action_t.LMQ_ACTION_PAUSE;
       }
     );
     this.#_callbackId = new MessageCallbackId(queue, this.#_callback.pointer);
     ffi.lmq_register_handler(queue, this.#_callback.pointer, true, null);
     lmq_msg_callback_registry?.register(this, this.#_callbackId, this);
+    deno_callback_registry?.register(this, this.#_callback as Deno.UnsafeCallback, this);
   }
 
   static _createConsumerFromQueuePointer(queue: Deno.PointerValue): MessageConsumer {
@@ -99,10 +107,14 @@ export class MessageConsumer {
   }
 
   free(): void {
-    if (this.#_callback && this.#_callbackId) {
+    if (this.#_callbackId) {
       lmq_msg_callback_registry?.unregister(this);
       ffi.lmq_deregister_handler(this.#_callbackId.queue, this.#_callbackId.callback);
       this.#_callbackId = undefined;
+    }
+    if (this.#_callback) {
+      deno_callback_registry?.unregister(this);
+      this.#_callback.close();
       this.#_callback = undefined;
     }
   }

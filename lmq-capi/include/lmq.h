@@ -101,7 +101,7 @@ lmq_message_t *lmq_consumer_wait(lmq_consumer_t *consumer);
 /**
  * Register an `lmq_msg_callback_t` handler function that will be called whenever a new unclaimed message is available.
  * 
- * If the given callback had already been registered with the given queue previously, the old callback will be replaced with the new one. The old callback will soon stop being called.
+ * If the given callback had already been registered with the given queue previously, the old callback will be replaced with the new one. The old callback will soon stop being called, although the timing of that is not guaranteed.
  * 
  * It is the user's responsibility to destroy the provided message at some point in the future using `lmq_message_destroy` after usage.
  * 

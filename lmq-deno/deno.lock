@@ -2,6 +2,7 @@
   "version": "4",
   "specifiers": {
     "jsr:@denosaurs/plug@1": "1.0.6",
+    "jsr:@std/assert@*": "0.221.0",
     "jsr:@std/assert@0.221": "0.221.0",
     "jsr:@std/encoding@0.221": "0.221.0",
     "jsr:@std/fmt@0.221": "0.221.0",
@@ -19,7 +20,10 @@
       ]
     },
     "@std/assert@0.221.0": {
-      "integrity": "a5f1aa6e7909dbea271754fd4ab3f4e687aeff4873b4cef9a320af813adb489a"
+      "integrity": "a5f1aa6e7909dbea271754fd4ab3f4e687aeff4873b4cef9a320af813adb489a",
+      "dependencies": [
+        "jsr:@std/fmt"
+      ]
     },
     "@std/encoding@0.221.0": {
       "integrity": "d1dd76ef0dc5d14088411e6dc1dede53bf8308c95d1537df1214c97137208e45"
@@ -30,14 +34,14 @@
     "@std/fs@0.221.0": {
       "integrity": "028044450299de8ed5a716ade4e6d524399f035513b85913794f4e81f07da286",
       "dependencies": [
-        "jsr:@std/assert",
+        "jsr:@std/assert@0.221",
         "jsr:@std/path"
       ]
     },
     "@std/path@0.221.0": {
       "integrity": "0a36f6b17314ef653a3a1649740cc8db51b25a133ecfe838f20b79a56ebe0095",
       "dependencies": [
-        "jsr:@std/assert"
+        "jsr:@std/assert@0.221"
       ]
     }
   },
