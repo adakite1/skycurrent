@@ -1,4 +1,4 @@
-use std::{ffi::c_void, panic};
+use std::{ffi::{c_int, c_void}, panic};
 
 use lmq_rs::{LinkMessageQueue, MessageConsumer, MessageRef, NextMessage};
 
@@ -84,6 +84,7 @@ ffi_fn! {
 #[repr(C)]
 pub enum lmq_action_t {
     LMQ_ACTION_CONTINUE = 0,
+    LMQ_ACTION_PAUSE = 1,
     LMQ_ACTION_DEREGISTER = -1,
 }
 
@@ -93,7 +94,7 @@ thread_local! {
         .enable_all()
         .build()
         .expect("failed to initialize tokio runtime!"));
-    static LMQ_WAIT_TASKS: std::cell::RefCell<std::collections::HashMap<(*const lmq_t, lmq_msg_callback_t), tokio::task::JoinHandle<()>>> = std::cell::RefCell::new(std::collections::HashMap::new());
+    static LMQ_WAIT_TASKS: std::cell::RefCell<std::collections::HashMap<(*const lmq_t, lmq_msg_callback_t), (tokio::task::JoinHandle<()>, tokio::sync::mpsc::Sender<lmq_resume_mode_t>)>> = std::cell::RefCell::new(std::collections::HashMap::new());
 }
 
 #[allow(non_camel_case_types)]
@@ -122,7 +123,7 @@ fn abort_handler_backend(rt: &std::cell::LazyCell<tokio::runtime::Runtime>, hand
 
 #[cfg(feature = "tokio")]
 ffi_fn! {
-    fn lmq_register_handler(queue: *const lmq_t, callback: lmq_msg_callback_t, user_data: *mut c_void) {
+    fn lmq_register_handler(queue: *const lmq_t, callback: lmq_msg_callback_t, start_paused: bool, user_data: *mut c_void) {
         let queue_rust = unsafe { &*queue };
         let mut consumer = queue_rust.0.create_consumer();
     
@@ -130,17 +131,48 @@ ffi_fn! {
         let user_data = UserData(user_data);
     
         TOKIO_RT.with(|rt| {
+            let (signal_tx, mut signal_rx) = tokio::sync::mpsc::channel(1);
+
             let join_handle = rt.spawn(async move {
+                let mut resume_mode = lmq_resume_mode_t::LMQ_RESUME_WAIT;
+                // If starting paused, wait for a resume signal before entering the main loop.
+                if start_paused {
+                    match signal_rx.recv().await {
+                        Some(new_resume_mode) => {
+                            resume_mode = new_resume_mode;
+                        },
+                        None => {
+                            // If the sender is gone, we have been deregistered.
+                            return;
+                        },
+                    }
+                }
                 loop {
-                    let message = consumer.next().await;
-                    let message = Box::into_raw(Box::new(lmq_message_t(message)));
+                    let message = match resume_mode {
+                        lmq_resume_mode_t::LMQ_RESUME_WAIT => Box::into_raw(Box::new(lmq_message_t(consumer.next().await))),
+                        lmq_resume_mode_t::LMQ_RESUME_TRY => match consumer.try_next() {
+                            Some(message) => Box::into_raw(Box::new(lmq_message_t(message))),
+                            None => std::ptr::null_mut(),
+                        },
+                    };
                     match callback(
                         message,
                         user_data.into()
                     ) {
                         lmq_action_t::LMQ_ACTION_CONTINUE => (),
+                        lmq_action_t::LMQ_ACTION_PAUSE => {
+                            match signal_rx.recv().await {
+                                Some(new_resume_mode) => {
+                                    resume_mode = new_resume_mode;
+                                },
+                                None => {
+                                    // If the sender is gone, we have been deregistered.
+                                    break;
+                                },
+                            }
+                        },
                         lmq_action_t::LMQ_ACTION_DEREGISTER => {
-                            // Note that we don't remove ourselves from `LMQ_WAIT_TASKS` since it's not really necessary; awaiting our join handle will simply return immediately as we are exiting naturally, so if the same callback is ever re-registered, our handle will be cleaned up then.
+                            //TODO: Note that we don't remove ourselves from `LMQ_WAIT_TASKS` since it's not really necessary; awaiting our join handle will simply return immediately as we are exiting naturally, so if the same callback is ever re-registered, our handle will be cleaned up then. This behavior might need a second look at some point.
                             break;
                         },
                     }
@@ -148,11 +180,42 @@ ffi_fn! {
             });
     
             LMQ_WAIT_TASKS.with_borrow_mut(|cell| {
-                if let Some(old_handle) = cell.insert((queue, callback), join_handle) {
+                if let Some((old_handle, _old_signal_tx)) = cell.insert((queue, callback), (join_handle, signal_tx)) {
                     abort_handler_backend(rt, old_handle);
                 }
             });
         });
+    }
+}
+
+#[allow(non_camel_case_types)]
+#[repr(C)]
+pub enum lmq_resume_mode_t {
+    LMQ_RESUME_WAIT = 0,
+    LMQ_RESUME_TRY = 1,
+}
+impl From<c_int> for lmq_resume_mode_t {
+    fn from(value: c_int) -> Self {
+        match value {
+            0 => Self::LMQ_RESUME_WAIT,
+            1 => Self::LMQ_RESUME_TRY,
+            _ => panic!("invalid resume mode. this should never happen."),
+        }
+    }
+}
+
+#[cfg(feature = "tokio")]
+ffi_fn! {
+    fn lmq_resume_handler(queue: *const lmq_t, callback: lmq_msg_callback_t, no_block: c_int) -> c_int {
+        LMQ_WAIT_TASKS.with_borrow(|cell| {
+            match cell.get(&(queue, callback)) {
+                Some((_, signal_tx)) => match signal_tx.blocking_send(no_block.into()) {
+                    Ok(_) => 0,  // handler resume signal sent.
+                    Err(_) => -1,  // handler is no longer running and cannot be resumed.
+                },
+                None => -1,  // handler is no longer running and cannot be resumed.
+            }
+        })
     }
 }
 
@@ -161,7 +224,7 @@ ffi_fn! {
     fn lmq_deregister_handler(queue: *const lmq_t, callback: lmq_msg_callback_t) -> bool {
         TOKIO_RT.with(|rt| {
             LMQ_WAIT_TASKS.with_borrow_mut(|cell| {
-                if let Some(old_handle) = cell.remove(&(queue, callback)) {
+                if let Some((old_handle, _old_signal_tx)) = cell.remove(&(queue, callback)) {
                     abort_handler_backend(rt, old_handle);
                     true
                 } else {
