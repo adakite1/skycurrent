@@ -1,4 +1,4 @@
-use std::{ffi::{c_int, c_void}, panic};
+use std::ffi::c_void;
 
 use lmq_rs::{LinkMessageQueue, MessageConsumer, MessageRef, NextMessage};
 

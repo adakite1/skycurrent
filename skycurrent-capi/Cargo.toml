@@ -13,7 +13,7 @@ crate-type = ["staticlib", "cdylib"]
 [dependencies]
 libc = "0.2"
 skycurrent-rs = { package = "skycurrent", path = "../skycurrent", default-features = false }
-lmq-capi = { path = "../lmq-capi", default-features = false }
+lmq-capi = { path = "../lmq-capi" }
 tokio = { version = "1.0", default-features = false }
 
 [features]
