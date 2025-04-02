@@ -1318,6 +1318,7 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "lmq-capi",
+ "parking_lot",
  "skycurrent",
  "tokio",
 ]

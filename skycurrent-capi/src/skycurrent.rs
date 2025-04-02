@@ -1,6 +1,7 @@
-use std::ffi::{c_char, c_int, c_void, CStr};
+use std::{ffi::{c_char, c_int, c_void, CStr}, sync::LazyLock};
 
 use lmq::lmq_consumer_t;
+use parking_lot::Mutex;
 use skycurrent_rs::{close, init, iter_stream, send_stream, set_global_project_dir, set_global_should_collect};
 
 ffi_fn! {
@@ -41,22 +42,24 @@ ffi_fn! {
     }
 }
 
+static TOKIO_RT: LazyLock<Mutex<Option<tokio::runtime::Runtime>>>  = LazyLock::new(|| Mutex::new(None));
+
 ffi_fn! {
     fn sc_close() {
-        close()
+        close();
+        drop(TOKIO_RT.lock().take());
     }
-}
-
-thread_local! {
-    static TOKIO_RT: std::cell::LazyCell<tokio::runtime::Runtime>  = std::cell::LazyCell::new(|| tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .expect("failed to initialize tokio runtime!"));
 }
 
 ffi_fn! {
     fn sc_init() {
-        TOKIO_RT.with(|rt| rt.block_on(init()))
+        let rt = {
+            TOKIO_RT.lock().get_or_insert_with(|| tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("failed to initialize tokio runtime!")).handle().clone()
+        };
+        rt.block_on(init())
     }
 }
 
