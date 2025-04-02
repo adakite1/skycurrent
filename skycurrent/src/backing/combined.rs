@@ -8,6 +8,14 @@ use bitvec::prelude as bv;
 
 use super::common::{actor_call, actor_join, TryRecvStreamResult};
 
+macro_rules! blocking_retry_after_small_timeout {
+    ($error:ident) => {{
+        eprintln!("{:?}", $error);
+        eprintln!("Retrying in 100ms...");
+        thread::sleep(Duration::from_millis(100));
+    }};
+}
+
 #[derive(Clone, Copy, Debug)]
 #[repr(u8)]
 pub enum Backing {
@@ -355,14 +363,6 @@ pub fn try_recv_stream() -> Result<TryRecvStreamResult, IpcError> {
                             // Once the echo of that message comes back, we will hear the message proper.
                             // This mirrors the behavior of sending directly with [`send_stream`].
                             // This is where the naming of the websocket gateway client as the websocket leaf comes from.
-                            #[cfg(feature = "backing-iox2")]
-                            macro_rules! blocking_retry_after_small_timeout {
-                                ($error:ident) => {{
-                                    eprintln!("{:?}", $error);
-                                    eprintln!("Retrying in 100ms...");
-                                    thread::sleep(Duration::from_millis(100));
-                                }};
-                            }
 
                             // Last 8 bytes of websocket payload should be header size (little-endian).
                             let header_size = u64::from_le_bytes((&payload)[payload.len()-8..].try_into().unwrap()) as usize;
@@ -559,10 +559,10 @@ pub fn close() {
             IpcError::Iox2IpcError(e) => match e {
                 super::iox2::IpcError::NotInitialized => panic!("if send flag was set, the thread meant for iox2 sending would definitely have been initialized for sending. this should never happen."),
                 super::iox2::IpcError::Iox2NotifierNotifyError(notifier_notify_error) => {
-                    eprintln!("WARNING: iox2 backend notify error encountered while trying to send the shutdown signal; will retry in 100ms! {:?}", notifier_notify_error);
+                    eprintln!("WARNING: iox2 backend notify error encountered while trying to send the shutdown signal!");
 
                     // Sleep for a while, then retry.
-                    thread::sleep(Duration::from_millis(100));
+                    blocking_retry_after_small_timeout!(notifier_notify_error);
 
                     continue;
                 },
