@@ -1,6 +1,6 @@
 {
   "name": "@lmq/deno",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "tag": "initial",
   "github": "https://github.com/adakite1/skycurrent",
   "exports": "./mod.ts",

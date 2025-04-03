@@ -299,8 +299,8 @@ export class NextMessage {
   /**
    * Get another reference to a previously created view of the underlying data.
    */
-  get current_view() {
-    return this.#_current_view;
+  get current_view(): Uint8Array | undefined {
+    return this.#_current_view ? new Uint8Array(this.#_current_view) : undefined;
   }
 }
 
