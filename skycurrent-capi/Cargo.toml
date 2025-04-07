@@ -14,7 +14,7 @@ crate-type = ["staticlib", "cdylib"]
 libc = "0.2"
 skycurrent-rs = { package = "skycurrent", path = "../skycurrent", default-features = false }
 lmq-capi = { path = "../lmq-capi" }
-tokio = { version = "1.0", default-features = false }
+tokio = { version = "1.44", default-features = false }
 parking_lot = "0.12"
 
 [features]
