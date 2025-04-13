@@ -1,0 +1,12 @@
+{
+  "name": "@skycurrent/deno",
+  "version": "0.1.0-alpha.1",
+  "tag": "initial",
+  "github": "https://github.com/adakite1/skycurrent",
+  "exports": "./mod.ts",
+  "license": "MIT OR Apache-2.0",
+  "imports": {
+    "@denosaurs/plug": "jsr:@denosaurs/plug@^1",
+    "@lmq/deno": "jsr:@lmq/deno@^0.1.3"
+  }
+}
