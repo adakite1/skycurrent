@@ -12,6 +12,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [dependencies]
 libc = "0.2"
+rand = "0.9"
 lmq-rs = { package = "lmq", path = "../lmq", default-features = false }
 tokio = { version = "1.44", optional = true, default-features = false }
 parking_lot = { version = "0.12", optional = true }

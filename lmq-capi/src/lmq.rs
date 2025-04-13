@@ -5,7 +5,7 @@ use lmq_rs::{LinkMessageQueue, MessageConsumer, MessageRef, NextMessage};
 #[allow(non_camel_case_types)]
 pub struct lmq_t(pub(crate) LinkMessageQueue);
 #[allow(non_camel_case_types)]
-pub struct lmq_consumer_t(MessageConsumer);
+pub struct lmq_consumer_t(pub(crate) MessageConsumer);
 #[allow(non_camel_case_types)]
 pub struct lmq_message_t(pub(crate) NextMessage);
 #[allow(non_camel_case_types, dead_code)]
@@ -92,10 +92,18 @@ pub enum lmq_action_t {
 pub type lmq_msg_callback_t = extern "C" fn(message: *mut lmq_message_t, user_data: *mut c_void) -> lmq_action_t;
 
 #[derive(Clone, Copy)]
-pub(crate) struct UserData(pub(crate) *mut c_void);
-unsafe impl Send for UserData {  }
-impl From<UserData> for *mut c_void {
-    fn from(value: UserData) -> Self {
+pub(crate) struct UserData<T>(pub(crate) *mut T);
+unsafe impl<T> Send for UserData<T> {  }
+impl<T> UserData<T> {
+    pub fn get_ptr(&self) -> *const T {
+        self.0
+    }
+    pub fn get_mut_ptr(&self) -> *mut T {
+        self.0
+    }
+}
+impl<T> From<UserData<T>> for *mut T {
+    fn from(value: UserData<T>) -> Self {
         value.0
     }
 }

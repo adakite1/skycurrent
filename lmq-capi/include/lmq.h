@@ -54,6 +54,11 @@ typedef struct lmq_vec_t lmq_vec_t;
 typedef lmq_action_t (*lmq_msg_callback_t)(lmq_message_t *message, void *user_data);
 
 /**
+ * 64-bit unsigned integer identifying a registered handler.
+ */
+typedef uint64_t lmq_msg_callback_id;
+
+/**
  * Create a new linked message queue.
  * 
  * The returned queue must be freed with `lmq_destroy` after usage.
@@ -87,12 +92,16 @@ void lmq_consumer_destroy(lmq_consumer_t *consumer);
  * 
  * Returns `NULL` if no new unclaimed messages are available.
  * 
+ * All previously obtained messages must either be claimed, destroyed, or have their peek views released before this function will unblock.
+ * 
  * The returned message must be freed with `lmq_message_destroy` after usage.
  */
 lmq_message_t *lmq_consumer_try_next(lmq_consumer_t *consumer);
 
 /**
  * Block until the next unclaimed message arrives.
+ * 
+ * All previously obtained messages must either be claimed, destroyed, or have their peek views released before this function will unblock.
  * 
  * The returned message must be freed with `lmq_message_destroy` after usage.
  */
@@ -101,9 +110,11 @@ lmq_message_t *lmq_consumer_wait(lmq_consumer_t *consumer);
 /**
  * Register an `lmq_msg_callback_t` handler function that will be called whenever a new unclaimed message is available.
  * 
- * If the given callback had already been registered with the given queue previously, the old callback will be replaced with the new one. The old callback will soon stop being called, although the timing of that is not guaranteed.
+ * Each handler is associated with an `lmq_consumer_t`. Users MUST avoid using or freeing the message consumer while the handler is registered, as the consumer will be used by the handler internally.
  * 
- * It is the user's responsibility to destroy the provided message at some point in the future using `lmq_message_destroy` after usage.
+ * Due also to the handler using the consumer behind-the-scenes, registering multiple callbacks using the same message consumer is undefined behavior! Message consumers are not thread-safe, so there will be data races. However there are no checks for if the given callback has already been registered using a given consumer already, so users should take care to avoid doing so.
+ * 
+ * All messages provided to the handler must either be claimed (`lmq_message_claim`), destroyed (`lmq_message_destroy`), or have their peek views released (`lmq_message_peek_release`) before the handler will be guaranteed a call with the next message.
  * 
  * Callback should return an `lmq_action_t` which can be used by the callback to either pause itself or immediately deregister. Paused handlers can be resumed by `lmq_resume_handler`.
  * 
@@ -113,9 +124,11 @@ lmq_message_t *lmq_consumer_wait(lmq_consumer_t *consumer);
  * 
  * `user_data` is passed *as-is* to the callback; it is the user's responsibility to make sure that the `user_data` pointer is thread-safe.
  * 
+ * Returns a `uint64_t` identifier for the registered handler which can be used to resume or deregister the handler.
+ * 
  * Only available when compiling with feature "tokio".
  */
-void lmq_register_handler(const lmq_t *queue, lmq_msg_callback_t callback, bool start_paused, void *user_data);
+lmq_msg_callback_id lmq_register_handler(lmq_consumer_t *consumer, lmq_msg_callback_t callback, bool start_paused, void *user_data);
 
 /**
  * Resume a handler currently paused from `LMQ_ACTION_PAUSE`.
@@ -128,16 +141,14 @@ void lmq_register_handler(const lmq_t *queue, lmq_msg_callback_t callback, bool 
  * 
  * Returns 0 on success and -1 if the handler is no longer running and cannot be resumed.
  */
-int lmq_resume_handler(const lmq_t *queue, lmq_msg_callback_t callback, int no_block);
+int lmq_resume_handler(lmq_msg_callback_id callback_id, int no_block);
 
 /**
  * Deregister a handler function.
  * 
- * Handlers must be deregistered from the same thread where it was originally registered.
- * 
  * Returns `TRUE` if a handler was successfully deregistered. If `FALSE` is returned, the provided handler was not registered with the given queue.
  */
-bool lmq_deregister_handler(const lmq_t *queue, lmq_msg_callback_t callback);
+bool lmq_deregister_handler(lmq_msg_callback_id callback_id);
 
 /**
  * Destroy message.
