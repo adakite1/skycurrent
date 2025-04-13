@@ -1,4 +1,4 @@
-use std::{collections::HashMap, ffi::{c_int, c_void}, panic, sync::LazyLock};
+use std::{collections::HashMap, ffi::{c_int, c_void}, panic, sync::{atomic::{AtomicU64, Ordering}, LazyLock}};
 
 use parking_lot::Mutex;
 use tokio::task::JoinHandle;
@@ -7,6 +7,16 @@ use crate::{lmq_action_t, lmq_consumer_t, lmq_message_t, lmq_msg_callback_t, Use
 
 static TOKIO_RT: LazyLock<Mutex<Option<tokio::runtime::Runtime>>>  = LazyLock::new(|| Mutex::new(None));
 static LMQ_WAIT_TASKS: LazyLock<Mutex<HashMap<u64, (JoinHandle<()>, tokio::sync::mpsc::Sender<lmq_resume_mode_t>)>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+static NEXT_CALLBACK_ID: AtomicU64 = AtomicU64::new(1);
+
+fn get_next_callback_id() -> u64 {
+    let id = NEXT_CALLBACK_ID.fetch_add(1, Ordering::Relaxed);
+    if id == 0 {
+        NEXT_CALLBACK_ID.fetch_add(1, Ordering::Relaxed)
+    } else {
+        id
+    }
+}
 
 fn deregister_handler(callback_id: u64, abort: Option<&tokio::runtime::Handle>, check_shutdown_tokio_runtime: bool) -> bool {
     let mut lock = LMQ_WAIT_TASKS.lock();
@@ -37,15 +47,7 @@ fn abort_handler_backend(rt: &tokio::runtime::Handle, handle: tokio::task::JoinH
 
 ffi_fn! {
     fn lmq_register_handler(consumer: *mut lmq_consumer_t, callback: lmq_msg_callback_t, start_paused: bool, user_data: *mut c_void) -> u64 {
-        let callback_id = {
-            let lock = LMQ_WAIT_TASKS.lock();
-            loop {
-                let callback_id: u64 = rand::random();
-                if callback_id != 0 && !lock.contains_key(&callback_id) {
-                    break callback_id;
-                }
-            }
-        };
+        let callback_id = get_next_callback_id();
     
         // Make `user_data` Send by using a wrapper.
         let user_data = UserData(user_data);
