@@ -57,28 +57,24 @@ const symbols = {
   },
   lmq_register_handler: {
     parameters: [
-      "pointer", // const lmq_t *queue
+      "pointer", // lmq_consumer_t *consumer
       // typedef lmq_action_t (*lmq_msg_callback_t)(lmq_message_t *message, void *user_data);
       "function", // lmq_msg_callback_t callback
       "bool", // bool start_paused
       "pointer", // void *user_data
     ],
-    result: "void",
+    result: "u64", // lmq_msg_callback_id
   },
   lmq_resume_handler: {
     parameters: [
-      "pointer", // const lmq_t *queue
-      // typedef lmq_action_t (*lmq_msg_callback_t)(lmq_message_t *message, void *user_data);
-      "function", // lmq_msg_callback_t callback
+      "u64", // lmq_msg_callback_id callback_id
       "i32", // int no_block
     ],
     result: "i32", // int
   },
   lmq_deregister_handler: {
     parameters: [
-      "pointer", // const lmq_t *queue
-      // typedef lmq_action_t (*lmq_msg_callback_t)(lmq_message_t *message, void *user_data);
-      "function", // lmq_msg_callback_t callback
+      "u64", // lmq_msg_callback_id callback_id
     ],
     result: "bool",
   },

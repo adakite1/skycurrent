@@ -41,26 +41,20 @@ export class LinkMessageQueue {
    * @returns `MessageConsumer` which can be used to consume messages from the queue.
    */
   create_consumer(): MessageConsumer {
-    return MessageConsumer._createConsumerFromQueuePointer(this.#_inner);
+    return MessageConsumer._createConsumerFromConsumerPointer(ffi.lmq_consumer_new(this.#_inner));
   }
 }
 
-class MessageCallbackId {
-  queue: Deno.PointerValue;
-  callback: Deno.PointerObject;
+type MessageCallbackId = bigint;
 
-  constructor(queue: Deno.PointerValue, callback: Deno.PointerObject) {
-    this.queue = queue;
-    this.callback = callback;
-  }
-}
-
-const lmq_msg_callback_registry = typeof FinalizationRegistry !== "undefined" ? 
-  new FinalizationRegistry(({queue, callback}: MessageCallbackId) => {
-    ffi.lmq_deregister_handler(queue, callback);
-  }) : undefined;
-const deno_callback_registry = typeof FinalizationRegistry !== "undefined" ? 
-  new FinalizationRegistry((callback: Deno.UnsafeCallback) => {
+const consumer_registry = typeof FinalizationRegistry !== "undefined" ? 
+  new FinalizationRegistry(({ underlyingConsumer, callbackId, callback }: {
+    underlyingConsumer: Deno.PointerValue,
+    callbackId: MessageCallbackId,
+    callback: Deno.UnsafeCallback,
+  }) => {
+    ffi.lmq_deregister_handler(callbackId);
+    ffi.lmq_consumer_destroy(underlyingConsumer);
     callback.close();
   }) : undefined;
 
@@ -70,11 +64,13 @@ const deno_callback_registry = typeof FinalizationRegistry !== "undefined" ?
  * Must be freed with the `free` method after use.
  */
 export class MessageConsumer {
+  #_underlyingConsumer?;
   #_callback?;
   #_callbackId?;
   #_resolve?: (value: (NextMessage | null) | PromiseLike<(NextMessage | null)>) => void;
 
-  private constructor(queue: Deno.PointerValue) {
+  private constructor(consumer: Deno.PointerValue) {
+    this.#_underlyingConsumer = consumer;
     this.#_callback = Deno.UnsafeCallback.threadSafe(
       {
         parameters: [
@@ -96,24 +92,29 @@ export class MessageConsumer {
         return lmq_action_t.LMQ_ACTION_PAUSE;
       }
     );
-    this.#_callbackId = new MessageCallbackId(queue, this.#_callback.pointer);
-    ffi.lmq_register_handler(queue, this.#_callback.pointer, true, null);
-    lmq_msg_callback_registry?.register(this, this.#_callbackId, this);
-    deno_callback_registry?.register(this, this.#_callback as Deno.UnsafeCallback, this);
+    this.#_callbackId = ffi.lmq_register_handler(this.#_underlyingConsumer, this.#_callback.pointer, true, null);
+    consumer_registry?.register(this, {
+      underlyingConsumer: this.#_underlyingConsumer,
+      callbackId: this.#_callbackId,
+      callback: this.#_callback as Deno.UnsafeCallback,
+    }, this);
   }
 
-  static _createConsumerFromQueuePointer(queue: Deno.PointerValue): MessageConsumer {
-    return new MessageConsumer(queue);
+  static _createConsumerFromConsumerPointer(consumer: Deno.PointerValue): MessageConsumer {
+    return new MessageConsumer(consumer);
   }
 
   free(): void {
+    consumer_registry?.unregister(this);
     if (this.#_callbackId) {
-      lmq_msg_callback_registry?.unregister(this);
-      ffi.lmq_deregister_handler(this.#_callbackId.queue, this.#_callbackId.callback);
+      ffi.lmq_deregister_handler(this.#_callbackId);
       this.#_callbackId = undefined;
     }
+    if (this.#_underlyingConsumer) {
+      ffi.lmq_consumer_destroy(this.#_underlyingConsumer);
+      this.#_underlyingConsumer = undefined;
+    }
     if (this.#_callback) {
-      deno_callback_registry?.unregister(this);
       this.#_callback.close();
       this.#_callback = undefined;
     }
@@ -123,6 +124,8 @@ export class MessageConsumer {
    * Asynchronously wait for the next message to arrive.
    * 
    * Only one `Promise` returned by either `next` or `try_next` can be unresolved at one time. An error will be thrown if this is not followed.
+   * 
+   * All previously obtained messages must either be claimed, destroyed, or have their read views released before this function will unblock.
    * 
    * @returns `Promise` that resolves with a new message.
    */
@@ -135,7 +138,9 @@ export class MessageConsumer {
    * 
    * Only one `Promise` returned by either `next` or `try_next` can be unresolved at one time. An error will be thrown if this is not followed.
    * 
-   * While the return value is still a `Promise`, unlike the promise returned by `next` the promise returned here should resolve almost instantly as it doesn't actually wait under-the-hood.
+   * All previously obtained messages must either be claimed, destroyed, or have their read views released before this function will unblock.
+   * 
+   * While the return value is still a `Promise`, unlike the promise returned by `next` the promise returned here should resolve almost instantly as it doesn't actually wait under-the-hood (as long as the previous line's condition is met).
    * 
    * @returns `Promise` that resolves with either a new message or `null` if none is immediately available.
    */
@@ -152,7 +157,7 @@ export class MessageConsumer {
       try {
         if (this.#_callbackId) {
           let error_code: number;
-          if ((error_code = ffi.lmq_resume_handler(this.#_callbackId.queue, this.#_callbackId.callback, no_block)) !== 0) {
+          if ((error_code = ffi.lmq_resume_handler(this.#_callbackId, no_block)) !== 0) {
             reject(new Error(`lmq internal error: \`lmq_resume_handler\` error code ${error_code}. handler is no longer running and cannot be resumed! this should never happen.`));
           }
         } else {
