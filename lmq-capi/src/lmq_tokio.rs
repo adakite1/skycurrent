@@ -41,7 +41,7 @@ ffi_fn! {
             let lock = LMQ_WAIT_TASKS.lock();
             loop {
                 let callback_id: u64 = rand::random();
-                if !lock.contains_key(&callback_id) {
+                if callback_id != 0 && !lock.contains_key(&callback_id) {
                     break callback_id;
                 }
             }
